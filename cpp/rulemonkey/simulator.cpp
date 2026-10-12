@@ -1713,10 +1713,18 @@ Model load_model(const std::string& xml_path,
             op.type = OpType::DeleteMolecule;
             auto del_id = need_attr(opn, "id");
             auto del_mols = opt_attr(opn, "DeleteMolecules");
-            // DeleteMolecules="1" means delete only the specified molecule(s),
-            // NOT the entire connected species.  Absence or "0" means delete
-            // the whole species.
-            op.delete_connected = (del_mols != "1");
+            // The id says what goes.  BNG2 names the ReactantPattern when the
+            // rule drops every molecule of it without the DeleteMolecules
+            // keyword, and then the whole species goes (RxnRule's MolDel gets
+            // the pattern).  Otherwise it names each dropped molecule, and
+            // only those go — with the keyword or without it, so a "0" on a
+            // molecule id is not a whole-species delete: `C(x!1).D(x!1) ->
+            // D(x)` keeps the D.  Reading every "0" as whole-species, as RM
+            // did, deleted the D too.  Without the keyword BNG2 further
+            // requires the remainder to form exactly the product patterns.
+            bool const names_pattern = reactant_pattern_ids.count(del_id) != 0;
+            op.delete_connected = names_pattern && del_mols != "1";
+            op.delete_requires_product_count = !names_pattern && del_mols != "1";
             auto dit = reactant_id_map.find(del_id);
             if (dit != reactant_id_map.end())
               op.delete_pattern_mol_idx = dit->second.first;
@@ -2634,8 +2642,13 @@ Model load_model(const std::string& xml_path,
       // up to 2x off in saturation if the symmetry was the enzyme slot's.
       if (rule.symmetry_factor != 1.0) {
         ReactantTransforms const rt = reactant_pattern_transforms(rule);
+        // A whole species the rule deletes contributes 1 to the factor, as
+        // context does (see ReactantTransforms::species_deleted).
+        auto carries_symmetry = [&](size_t i) {
+          return rt.transformed[i] != 0 && rt.species_deleted[i] == 0;
+        };
         bool const both_transformed = rt.resolvable && rt.transformed.size() > 1 &&
-                                      rt.transformed[0] != 0 && rt.transformed[1] != 0;
+                                      carries_symmetry(0) && carries_symmetry(1);
         if (both_transformed)
           unsupported_out->push_back(
               {Severity::Warn, "ReactionRule@symmetry_factor",

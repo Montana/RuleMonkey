@@ -145,7 +145,18 @@ struct RuleOp {
 
   // For DeleteMolecule: which reactant-pattern molecule to delete
   int delete_pattern_mol_idx = -1;
-  bool delete_connected = false; // true = delete entire species; false = molecule-only
+  // True for a whole-species delete: BNG2 names the ReactantPattern, not a
+  // molecule, when the rule drops every molecule of the pattern without the
+  // DeleteMolecules keyword (`A() -> 0`), and the matched molecule's whole
+  // complex goes.  delete_pattern_mol_idx is then the pattern's first
+  // molecule, which only anchors the complex.
+  bool delete_connected = false;
+  // A molecule delete without the keyword (BNG2 writes DeleteMolecules="0"
+  // on a molecule id when the rule keeps the rest of the pattern,
+  // `C(x!1).D(x!1) -> D(x)`).  Only that molecule goes, and BNG2 lets the
+  // reaction happen only if what is left forms exactly as many species as
+  // the rule has product patterns; the keyword lifts that restriction.
+  bool delete_requires_product_count = false;
 };
 
 // ---- Rate law --------------------------------------------------------------
@@ -341,12 +352,23 @@ struct Rule {
 // treat every pattern as transformed.
 struct ReactantTransforms {
   std::vector<char> transformed; // one entry per reactant pattern, 1 = touched
+  // One entry per reactant pattern, 1 = the rule deletes its whole species
+  // (RuleOp::delete_connected).  Such a pattern is transformed, but BNG2
+  // makes the SPECIES its reaction center (RxnRule::find_reaction_center), so
+  // every match of the pattern into one species is the same reaction: it is
+  // counted once per matching complex, like context, and like context it
+  // contributes 1 to the symmetry factor, all of its automorphisms fixing the
+  // species.
+  std::vector<char> species_deleted;
   bool resolvable = false;
 
   // Convenience for the two-slot callers.  Answers "transformed" for any
   // slot the derivation could not resolve or that does not exist.
   bool is_context(size_t slot) const {
     return resolvable && slot < transformed.size() && transformed[slot] == 0;
+  }
+  bool deletes_species(size_t slot) const {
+    return resolvable && slot < species_deleted.size() && species_deleted[slot] != 0;
   }
 };
 
@@ -357,6 +379,7 @@ inline ReactantTransforms reactant_pattern_transforms(const Rule& rule) {
   if (n_rp <= 0)
     return out;
   out.transformed.assign(static_cast<size_t>(n_rp), 0);
+  out.species_deleted.assign(static_cast<size_t>(n_rp), 0);
   out.resolvable = true;
 
   // pattern molecule index -> reactant pattern index
@@ -413,10 +436,13 @@ inline ReactantTransforms reactant_pattern_transforms(const Rule& rule) {
     case OpType::DeleteMolecule: {
       int const mi = op.delete_pattern_mol_idx;
       int const p = (mi >= 0) ? rp_of_mol(mi) : -1;
-      if (p < 0)
+      if (p < 0) {
         out.resolvable = false;
-      else
+      } else {
         out.transformed[static_cast<size_t>(p)] = 1;
+        if (op.delete_connected)
+          out.species_deleted[static_cast<size_t>(p)] = 1;
+      }
       break;
     }
     case OpType::AddMolecule:

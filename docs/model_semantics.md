@@ -54,8 +54,27 @@ The runtime severity model is two-level:
 - `StateChange`, including state-increment / state-decrement (the BNGL
   `s~U~P~PP+` shorthand).
 - `AddMolecule` (synthesis from nothing or from existing reactants).
-- `DeleteMolecule`, both `DeleteMolecules="1"` (single-molecule) and
-  the default whole-species delete.
+- `DeleteMolecule`. What goes depends on what the rule drops, as in BNG2:
+  - **Every molecule of a reactant pattern, no `DeleteMolecules`**
+    (`A() -> 0`): the whole species the pattern matched. BNG2 makes that
+    species the rule's reaction center, so the rule fires **once per
+    matching species**, at `k`, however many of its molecules match and
+    however the pattern names it: `A() -> 0` on an `A.A` dimer is one
+    reaction, not two, and `A().B() -> 0` and `B().A() -> 0` agree on an
+    `A.B.A`. RM counts such a pattern once per matching complex, as it does
+    an untransformed one. NFsim attaches the delete to the pattern's first
+    molecule and counts one instance per match of it, which RM also did
+    until this was fixed; it makes the rate depend on the order the pattern
+    lists its molecules in, and NFsim's `-cb` / `-bscb` do not change it.
+  - **Some molecules of a pattern, no `DeleteMolecules`**
+    (`C(x!1).D(x!1) -> D(x)`): only those molecules. The reaction happens
+    only if what is left forms exactly as many species as the rule has
+    product patterns, so this rule does not fire on a C that also holds an
+    E (deleting it would leave the D and the E apart). RM used to delete the
+    whole species here, taking the kept D with it. NFsim refuses such a rule
+    at load.
+  - **`DeleteMolecules`**: only the named molecules, and the remainder may
+    split into more species than the rule has product patterns.
 
 ### Rate laws
 

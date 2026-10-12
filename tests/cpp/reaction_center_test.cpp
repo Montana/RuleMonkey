@@ -115,8 +115,8 @@ int main(int argc, char* argv[]) {
       // defect this pins moves its pool by 400 or more.
       double const tol = 5.0 * std::sqrt(kN * p * (1.0 - p) / kReps);
       check(std::abs(mean - expected) < tol,
-            std::string(pools[i].observable) + ": expected " + std::to_string(expected) +
-                " +- " + std::to_string(tol) + ", observed " + std::to_string(mean));
+            std::string(pools[i].observable) + ": expected " + std::to_string(expected) + " +- " +
+                std::to_string(tol) + ", observed " + std::to_string(mean));
     }
   } catch (const std::exception& e) {
     std::fprintf(stderr, "FAIL: exception: %s\n", e.what());

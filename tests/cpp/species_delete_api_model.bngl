@@ -1,0 +1,24 @@
+# Fixture for species_delete_api_test.  A is a monomer at load -- nothing in
+# the model ever bonds it -- so `A() -> 0` starts on the per-molecule count;
+# the test then adds A.A dimers through the API.
+begin model
+begin parameters
+  k 1.0
+  N 2000
+end parameters
+begin molecule types
+  A(b)
+end molecule types
+begin seed species
+  A(b)  N
+end seed species
+begin observables
+  Molecules A_tot A()
+end observables
+begin reaction rules
+  Degrade: A() -> 0  k
+end reaction rules
+end model
+begin actions
+  writeXML()
+end actions

@@ -9,6 +9,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A whole-species delete fired once per matching molecule, not once per
+  species.** A rule that drops every molecule of a reactant pattern without
+  the DeleteMolecules keyword deletes the species the pattern matched, and
+  BNG2 makes that species the rule's reaction center
+  (`RxnRule::find_reaction_center`), so every match into one species is one
+  reaction. RM, like NFsim, anchored the delete at the pattern's first
+  molecule and counted one instance per match of it. On 2000 copies at
+  `k t = 0.5`, BNG2's network leaves 1213 of each of these; RM left about
+  736 of the first four:
+
+  | rule | species | RM before |
+  |---|---|---|
+  | `A() -> 0` | `A.A` | 2k |
+  | `A(b!1).A(b!1) -> 0` | `A.A` | 2k |
+  | `A() -> 0` | `A.B.A` | 2k |
+  | `A().B() -> 0` | `A.B.A` | 2k |
+  | `B().A() -> 0` | `A.B.A` | k |
+
+  The last two rows are the #88 defect again: the same graph, two rates.
+  NFsim gives the same wrong answers with or without `-cb` / `-bscb`. A
+  whole-species delete is now counted per complex, through the tally
+  context patterns use (issue #33), wherever its molecule type can share a
+  complex; a type that is a monomer for the whole run has one match per
+  complex already and keeps the cheaper per-molecule count, so the common
+  `X() -> 0` degradation rule pays nothing. `add_species`, which can put a
+  type into a complex the model never makes, refreshes that.
+
+- **A partial delete without the keyword deleted the whole species.**
+  BNG2 writes `DeleteMolecules="0"` on a molecule id when a rule drops some
+  molecules of a pattern and keeps the rest (`C(x!1).D(x!1) -> D(x)`); only
+  the dropped molecules go, and the reaction happens only if what is left
+  forms exactly as many species as the rule has product patterns. RM read
+  every `"0"` as "delete the whole species", so it took the D the rule
+  keeps, and it fired where BNG2 does not (a C that also holds an E, or a
+  bridge whose two ends are also bonded directly). Only the named molecules
+  go now, and a draw that would leave the wrong number of species is a null
+  event. NFsim refuses such a rule at load. No corpus model uses one.
+
+  `tests/bng_oracle/models/species_delete.bngl` pins both against BNG2's
+  network — NFsim cannot be the reference for either — and
+  `species_delete_api_test` pins the `add_species` path. 186 of 190 corpus
+  models are byte-identical; `r08`, `r24`, `r25` and `r26` delete molecules
+  that can bind, so their deletes moved onto the per-complex count with the
+  same counts (each complex holds one match) and a different draw stream.
+  All four pass against NFsim.
+
 - **A rule's rate depended on the order its reactant pattern listed
   molecules in (issue #88).** BNG2 counts one reaction per distinct
   placement of a rule's reaction center — the components whose state or
