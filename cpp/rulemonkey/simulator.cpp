@@ -1831,6 +1831,7 @@ Model load_model(const std::string& xml_path,
                 if (rit != reactant_id_map.end() &&
                     reactant_pattern_ids.find(argval) == reactant_pattern_ids.end()) {
                   rule.rate_law.local_arg_is_molecule = true;
+                  rule.rate_law.local_tag_mol = rit->second.first;
                 } else if (rit == reactant_id_map.end()) {
                   std::fprintf(stderr,
                                "Warning: local function arg '%s' in "
@@ -1866,10 +1867,13 @@ Model load_model(const std::string& xml_path,
           rule.rate_law.type = RateLawType::FunctionProduct;
           rule.rate_law.is_dynamic = true;
 
-          // Resolve an Argument `value` to (reactant-pattern-index, per_mol).
-          auto resolve_factor = [&](const std::string& argval, int& out_rp_idx, bool& out_per_mol) {
+          // Resolve an Argument `value` to (reactant-pattern-index, per_mol,
+          // tagged pattern molecule).
+          auto resolve_factor = [&](const std::string& argval, int& out_rp_idx, bool& out_per_mol,
+                                    int& out_tag_mol) {
             out_rp_idx = -1;
             out_per_mol = false;
+            out_tag_mol = -1;
             // Direct ReactantPattern-id match -> complex-wide scope.
             for (int k = 0; k < static_cast<int>(rp_id_list.size()); ++k) {
               if (rp_id_list[k] == argval) {
@@ -1888,6 +1892,8 @@ Model load_model(const std::string& xml_path,
                   out_rp_idx = k;
               }
               out_per_mol = (reactant_pattern_ids.find(argval) == reactant_pattern_ids.end());
+              if (out_per_mol)
+                out_tag_mol = mol_off;
             }
           };
 
@@ -1906,14 +1912,15 @@ Model load_model(const std::string& xml_path,
             std::string fn;
             int rp_idx = -1;
             bool per_mol = false;
+            int tag_mol = -1;
           };
           std::array<Factor, 2> factors;
           factors[0].fn = opt_attr(*rl_node, "name1");
           factors[1].fn = opt_attr(*rl_node, "name2");
-          resolve_factor(first_arg_value("ListOfArguments1"), factors[0].rp_idx,
-                         factors[0].per_mol);
-          resolve_factor(first_arg_value("ListOfArguments2"), factors[1].rp_idx,
-                         factors[1].per_mol);
+          resolve_factor(first_arg_value("ListOfArguments1"), factors[0].rp_idx, factors[0].per_mol,
+                         factors[0].tag_mol);
+          resolve_factor(first_arg_value("ListOfArguments2"), factors[1].rp_idx, factors[1].per_mol,
+                         factors[1].tag_mol);
 
           // Assign the pattern-0 factor to the A-side and pattern-1 to the
           // B-side.  Default to declaration order if a reference can't be
@@ -1926,9 +1933,11 @@ Model load_model(const std::string& xml_path,
           rule.rate_law.function_name = factors[a_factor].fn;
           rule.rate_law.is_local = true;
           rule.rate_law.local_arg_is_molecule = factors[a_factor].per_mol;
+          rule.rate_law.local_tag_mol = factors[a_factor].tag_mol;
           rule.rate_law.function_name_b = factors[b_factor].fn;
           rule.rate_law.is_local_b = true;
           rule.rate_law.local_arg_is_molecule_b = factors[b_factor].per_mol;
+          rule.rate_law.local_tag_mol_b = factors[b_factor].tag_mol;
         } else if (rl_type == "MM") {
           rule.rate_law.type = RateLawType::MM;
           auto* rc_list = find_child(*rl_node, "ListOfRateConstants");
@@ -1974,6 +1983,8 @@ Model load_model(const std::string& xml_path,
             // Tag on reactant pattern 1 — move the factor to the B slot.
             rule.rate_law.function_name_b = rule.rate_law.function_name;
             rule.rate_law.local_arg_is_molecule_b = rule.rate_law.local_arg_is_molecule;
+            rule.rate_law.local_tag_mol_b = rule.rate_law.local_tag_mol;
+            rule.rate_law.local_tag_mol = -1;
             rule.rate_law.function_name.clear();
             rule.rate_law.unity_factor_a = true;
             // Per-molecule scope on the unity side skips the per-complex

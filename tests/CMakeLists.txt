@@ -582,6 +582,22 @@ add_test(
         ${_rulemonkey_test_dir}/cpp/multimol_overlap_model.xml
 )
 
+# Reaction-center counting (issue #88): a rule fires once per distinct image
+# of its reaction center, wherever its pattern lists the transformed
+# molecule.  One independent pool per way the old per-seed count went wrong
+# — context listed first (unimolecular, bimolecular, n-ary), a center on two
+# molecules, a dead-end representative, a `.`-joined context molecule, a
+# symmetric deleted molecule, a tag on context — each with an exact binomial
+# expectation, plus the draw between two centers reached unequally often.
+add_executable(reaction_center_test cpp/reaction_center_test.cpp)
+target_link_libraries(reaction_center_test PRIVATE rulemonkey)
+
+add_test(
+    NAME reaction_center_test
+    COMMAND reaction_center_test
+        ${_rulemonkey_test_dir}/cpp/reaction_center_model.xml
+)
+
 # Global-function exposure regression (issue #7): pins down that
 # Result::function_names / function_data, RuleMonkeySimulator::function_names()
 # and get_function_values() expose BNGL global-function values, that the

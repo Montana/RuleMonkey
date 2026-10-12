@@ -212,7 +212,12 @@ jobs:
 
       - name: Run feature_coverage benchmark
         run: |
-          python3 harness/benchmark_feature_coverage.py --reps 5 \
+          # 10 reps, not 5: the verdict divides by RM's own SE, and from 5
+          # fixed seeds that estimate is noisy enough that a change of draw
+          # stream alone can push a small model past tz 5 (issue #88 moved
+          # ft_catalytic_unbinding to tz 6.82 with an E_free SE of 0.71
+          # against a true ~2.5; it reads 2.50 at 20 reps).
+          python3 harness/benchmark_feature_coverage.py --reps 10 \
             | tee build/feature_coverage_console.log
           # Fail the job if any model failed.  The runner's tail line is
           # exactly "TOTAL: X PASS / Y FAIL / Z other"; we extract Y.

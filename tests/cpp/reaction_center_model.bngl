@@ -1,0 +1,135 @@
+# Fixture for reaction_center_test (issue #88).
+#
+# BioNetGen counts a rule's reactions by their reaction center: two matches
+# that put the transformed components (and deleted molecules) in the same
+# place are one reaction, however they differ in untransformed context.
+# Every pool below is independent and every instance in it fires at k, so
+# each pool's unconverted count at time t is exactly Binomial(N, exp(-m*k*t))
+# with the multiplicity m given per pool.  BNG2's generate_network() gives
+# the same m for every pool (one reaction per species at rate m*k).
+begin model
+begin parameters
+  k 1.0
+  N 2000
+end parameters
+begin molecule types
+  L1(r,r)
+  R1(l,l,s~0~1)
+  L2(r,r)
+  R2(l,l,s~0~1)
+  L3(r,r)
+  R3(l,l,s~0~1)
+  La(r,r,s~0~1)
+  Ra(l,t~0~1,q,q,m~a~b)
+  Lb(r,r)
+  Rb(l,l,s~0~1)
+  E(s~0~1,f)
+  F(e,g)
+  Ad(b,b)
+  Lx(r,r)
+  Rx(l)
+  Ay(s~0~1,b,b)
+  By(a)
+  Sp(x~0~1,a)
+  Pp(b,c,c)
+  Qp(d)
+  Zp(d)
+  Lc(r,r)
+  Rc(l,l,s~0~1)
+  Ec()
+  Ln(r,r)
+  Rn(l,l,s~0~1)
+  An()
+  Bn()
+  Rt(l,s~0~1)
+  Lt(r,w~0~1)
+end molecule types
+begin seed species
+  # Chain R-L-R-L-R; only the middle R starts at s~0, linked through two L.
+  R1(l!1,l,s~1).L1(r!1,r!2).R1(l!2,l!3,s~0).L1(r!3,r!4).R1(l!4,l,s~1)  N
+  R2(l!1,l,s~1).L2(r!1,r!2).R2(l!2,l!3,s~0).L2(r!3,r!4).R2(l!4,l,s~1)  N
+  # One R holding two L, each bound by one arm.
+  L3(r!1,r).R3(l!1,l!2,s~0).L3(r!2,r)  N
+  # One L between two R, marked a and b.  R a has both q free and R b one, so
+  # R a's center is reached through two complete matches of the rule and
+  # R b's through one.
+  Ra(l!1,t~0,q,q,m~a).La(r!1,r!2,s~0).Ra(l!2,t~0,q!3,q,m~b).Ra(l,t~1,q!3,q,m~b)  N
+  # The middle R's first l leads to an L with a free arm, which cannot reach
+  # a second R; its other l leads to one that can.
+  Lb(r!1,r).Rb(l!1,l!2,s~0).Lb(r!2,r!3).Rb(l!3,l,s~1)  N
+  # An E in a complex with two F, joined to it by a path but not by the rule.
+  E(s~0,f!1).F(e!1,g!2).F(e,g!2)  N
+  Ad(b,b)  N
+  # An L holding an R on each arm.
+  Rx(l!1).Lx(r!1,r!2).Rx(l!2)  N
+  # An A holding a B on each arm.
+  Ay(s~0,b!1,b!2).By(a!1).By(a!2)  N
+  # The P's first c leads to a Z, its second to the Q the rule wants.
+  Sp(x~0,a!1).Pp(b!1,c!2,c!3).Zp(d!2).Qp(d!3)  N
+  # The ContextFirst chain again, on the bimolecular and n-ary paths.
+  Rc(l!1,l,s~1).Lc(r!1,r!2).Rc(l!2,l!3,s~0).Lc(r!3,r!4).Rc(l!4,l,s~1)  N
+  Ec()  1
+  Rn(l!1,l,s~1).Ln(r!1,r!2).Rn(l!2,l!3,s~0).Ln(r!3,r!4).Rn(l!4,l,s~1)  N
+  An()  1
+  Bn()  1
+  Rt(l!1,s~0).Lt(r!1,w~1)  N
+end seed species
+begin observables
+  Molecules ContextFirst      R1(s~0)
+  Molecules TransformedFirst  R2(s~0)
+  Molecules ContextFirstHub   R3(s~0)
+  Molecules TwoCenters        La(s~0)
+  Molecules TwoCentersA       Ra(t~1,m~a)
+  Molecules DeadEndFirst      Rb(s~0)
+  Molecules DotContext        E(s~0)
+  Molecules DeleteSymmetric   Ad()
+  Molecules DeleteBoundL      Lx()
+  Molecules DeleteOneOfTwo    Ay(s~0)
+  Molecules PartnerBranch     Sp(x~0)
+  Molecules Bimolecular       Rc(s~0)
+  Molecules Nary              Rn(s~0)
+  Molecules TagOnContext      Rt(s~0)
+  Molecules LtW               Lt(w~1)
+end observables
+begin functions
+  f(x) = k*LtW(x)
+end functions
+begin reaction rules
+  # m = 1: the converting R is reached through either L; the two matches
+  # differ only in context.  Written context first ...
+  ContextFirst: L1(r!1,r!2).R1(l!1,s~0).R1(l!2) -> L1(r!1,r!2).R1(l!1,s~1).R1(l!2)  k
+  # ... and as the same graph written transformed first.
+  TransformedFirst: R2(l!1,s~0).L2(r!1,r!2).R2(l!2) -> R2(l!1,s~1).L2(r!1,r!2).R2(l!2)  k
+  ContextFirstHub: L3(r!1,r).R3(l!1,l!2,s~0).L3(r!2,r) -> L3(r!1,r).R3(l!1,l!2,s~1).L3(r!2,r)  k
+  # m = 2: the center spans La's s and the first Ra's t, and either Ra can be
+  # the first, so the La has two distinct centers.  Each is drawn half the
+  # time, however many matches reach it (TwoCentersA counts R a's share).
+  TwoCenters: La(r!1,r!2,s~0).Ra(l!1,t~0,q).Ra(l!2) -> La(r!1,r!2,s~1).Ra(l!1,t~1,q).Ra(l!2)  k
+  # m = 1: written transformed first, but only one of the seed's two
+  # embeddings reaches a whole match.
+  DeadEndFirst: Rb(l!1,s~0).Lb(r!1,r!2).Rb(l!2) -> Rb(l!1,s~1).Lb(r!1,r!2).Rb(l!2)  k
+  # m = 1: a `.`-joined context molecule with two copies in the complex.
+  DotContext: F().E(s~0) -> F().E(s~1)  k
+  # m = 1: the deleted molecule is the whole center.
+  DeleteSymmetric: Ad(b) -> 0  k  DeleteMolecules
+  # m = 1: the same in a two-molecule pattern, which the L reaches through
+  # either arm.
+  DeleteBoundL: Lx(r!1).Rx(l!1) -> Rx(l)  k  DeleteMolecules
+  # m = 2: the center is the A's s and the B the rule deletes, and either B
+  # can be the one, so the A has two distinct centers.
+  DeleteOneOfTwo: Ay(s~0,b!1).By(a!1) -> Ay(s~1,b)  k  DeleteMolecules
+  # m = 1: the P can be entered with either c on the Q side; only the second
+  # reaches one.
+  PartnerBranch: Sp(x~0,a!1).Pp(b!1,c!2).Qp(d!2) -> Sp(x~1,a!1).Pp(b!1,c!2).Qp(d!2)  k
+  # m = 1 per instance against one Ec: the transformed slot written context first.
+  Bimolecular: Lc(r!1,r!2).Rc(l!1,s~0).Rc(l!2) + Ec() -> Lc(r!1,r!2).Rc(l!1,s~1).Rc(l!2) + Ec()  k
+  # m = 1 against one An and one Bn: the same on the n-ary path.
+  Nary: Ln(r!1,r!2).Rn(l!1,s~0).Rn(l!2) + An() + Bn() -> Ln(r!1,r!2).Rn(l!1,s~1).Rn(l!2) + An() + Bn()  k
+  # m = 1: a per-molecule local function tagged on the context molecule,
+  # which reads 1 there and 0 on the R.
+  TagOnContext: Rt(l!1,s~0).Lt(r!1)%x -> Rt(l!1,s~1).Lt(r!1)%x  f(x)
+end reaction rules
+end model
+begin actions
+  writeXML()
+end actions

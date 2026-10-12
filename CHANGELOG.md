@@ -9,6 +9,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A rule's rate depended on the order its reactant pattern listed
+  molecules in (issue #88).** BNG2 counts one reaction per distinct
+  placement of a rule's reaction center — the components whose state or
+  bond it changes and the molecules it deletes — however the matches
+  differ in untransformed context. RM seeded every reactant pattern on its
+  first molecule, summed over seeds, and collapsed matches only on the
+  seed's own changed components. So
+
+  ```bngl
+  L(r!1,r!2).R(l!1,s~0).R(l!2) -> L(r!1,r!2).R(l!1,s~1).R(l!2)  k
+  ```
+
+  fired at `2k` on an R linked through two L, once per L, while the same
+  graph written R first fired at `k`. The same per-seed count went wrong
+  in five more ways, all fixed here and all measured against BNG2's
+  generated network:
+
+  - a center spanning two molecules was collapsed on one of them, so an L
+    between two R whose rule also changes the first R fired at `k`, not
+    `2k`;
+  - the collapse kept the first seed embedding of each group whether or
+    not it reached a whole match, which left a rule written transformed
+    first inert on an R whose first `l` led to a dead end;
+  - the walk out of the seed committed to the first partner embedding,
+    which left a rule inert when a symmetric partner's first way of
+    filling the pattern dead-ended;
+  - a `.`-joined context molecule with two copies in the complex
+    (`F().E(s~0)`) and a deleted molecule with symmetric components
+    (`A(b) -> 0 DeleteMolecules` on an `A(b,b)`) each counted 2x;
+  - a per-molecule local function tagged on a molecule other than the
+    first was evaluated at the first, where `R(l!1,s~0).L(r!1)%x` read
+    its observable of L as 0 and never fired.
+
+  Each reactant pattern is now seeded on its first molecule in the
+  reaction center (on the tagged molecule when it carries a per-molecule
+  tag) — NFsim, too, heads each reactant at a molecule the rule transforms
+  — and its whole matches are collapsed on the whole center. The bimolecular and n-ary paths share
+  the change. A rule that already lists a center molecule first keeps its
+  seed, and its exact draw stream wherever the old count was right, except
+  where a seed embedding reaches several whole matches through a
+  `.`-joined molecule (the draw is now over center placements directly).
+
+  In the corpora, the change is visible on `ensemble`: its Ste5
+  dimerization, `Ste4(ste5!1).Ste5(ste5,ste4!1,loc~c) + Ste5(...).Ste4(...)`,
+  lists Ste4 first, so its homodimer correction never saw the shared Ste5
+  and the rule fired about 2x. Sixteen other corpus models list context
+  first in some rule and change their draw stream; on a shared mid-run
+  state their rule propensities are identical to main's. `rm_tlbr_rings`
+  changes stream through the `.`-joined case. The other 171 of the 189
+  corpus models are byte-identical. `tests/cpp/reaction_center_test`
+  pins every case above with an exact binomial expectation, and
+  `ft_reaction_center_seed` runs the issue's chemistry both ways round
+  against NFsim.
+
 - **An observable named `time` was never bound, so a bare `time` in a rate
   law read the clock instead (issue #87).** BNG2 rejects a *parameter*
   named `time` but accepts an observable of that name, and the bare word is

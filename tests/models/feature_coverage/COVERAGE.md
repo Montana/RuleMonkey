@@ -39,6 +39,7 @@
 | Multi-mol unimolecular | multi-molecule reactant pattern | combo_multimol_unimol | PASS |
 | N-ary rule with a complex reactant | 3 ReactantPatterns, one multi-molecule | ft_nary_complex_reactant | PASS |
 | Multi-mol reactant with dead-end seed embeddings | multi-molecule ReactantPattern, seed with repeated components | ft_multimol_deadend_seed | PASS |
+| Reactant pattern listing untransformed context first | multi-molecule ReactantPattern whose first Molecule no operation touches | ft_reaction_center_seed | PASS (same chemistry written context first and transformed first; the rate counts reaction centers, not seed molecules) |
 | Push-pull enzyme kinetics | Michaelis-Menten cycle pattern | ft_push_pull | PASS |
 | Ring closure | intramolecular bonds | ft_ring_closure | PASS |
 | Signaling cascade | multi-step recruitment | ft_signaling_cascade | PASS |
