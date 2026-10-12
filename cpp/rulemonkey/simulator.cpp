@@ -3446,17 +3446,19 @@ struct RuleMonkeySimulator::Impl {
 
         Result r;
         if (reset_conc) {
-          // Fresh, independent run from seed species.  Every point uses
-          // the same seed: as in BNG, the seed is run-level, not
-          // per-point, so points share a random stream.
+          // Fresh, independent run from seed species at per_point.t_start.
+          // Every point uses the same seed: as in BNG, the seed is
+          // run-level, not per-point, so points share a random stream.
           Engine engine(model, seed, molecule_limit);
           r = engine.run(TimeSpec{per_point.t_start, per_point.t_end, per_point.n_points, {}});
         } else {
-          // Carry-over chain: point 0 starts from seed species; every
-          // later point resumes the prior point's pool + RNG state.
+          // Carry-over chain: point 0 starts from seed species at
+          // per_point.t_start, as a fresh point does (issue #98); every
+          // later point resumes the prior point's pool + RNG state, and its
+          // clock.
           if (k == 0) {
             session = std::make_unique<Engine>(model, seed, molecule_limit);
-            session->initialize();
+            session->initialize(per_point.t_start);
           } else {
             session = std::make_unique<Engine>(model, 0, molecule_limit);
             std::istringstream is(carried_state);
@@ -3625,6 +3627,11 @@ void RuleMonkeySimulator::set_block_same_complex_binding(bool value) {
 
 Result RuleMonkeySimulator::run(const TimeSpec& ts, std::uint64_t seed,
                                 const CancelCallback& should_continue) {
+  // A reversed window runs nothing and labels the seed state with every
+  // sample time, as simulate() and parameter_scan already refuse to.
+  if (ts.t_end < ts.t_start)
+    throw std::runtime_error("run: t_end (" + std::to_string(ts.t_end) +
+                             ") is earlier than t_start (" + std::to_string(ts.t_start) + ")");
   impl_->apply_overrides();
   Engine engine(impl_->model, seed, impl_->molecule_limit);
   return engine.run(ts, should_continue);
@@ -3693,10 +3700,14 @@ BifurcateResult RuleMonkeySimulator::bifurcate(const ScanSpec& spec, std::uint64
 // Session API
 // ---------------------------------------------------------------------------
 
-void RuleMonkeySimulator::initialize(std::uint64_t seed) {
+void RuleMonkeySimulator::initialize(std::uint64_t seed, double t_start) {
   impl_->apply_overrides();
-  impl_->session = std::make_unique<Engine>(impl_->model, seed, impl_->molecule_limit);
-  impl_->session->initialize();
+  // Published only once initialized: an engine left behind by a throw here
+  // would initialize itself lazily at the next simulate()'s t_start.
+  impl_->session.reset();
+  auto session = std::make_unique<Engine>(impl_->model, seed, impl_->molecule_limit);
+  session->initialize(t_start);
+  impl_->session = std::move(session);
 }
 
 void RuleMonkeySimulator::step_to(double time, const CancelCallback& should_continue) {
@@ -3727,8 +3738,8 @@ Result RuleMonkeySimulator::simulate(double t_start, double t_end, int n_points,
     std::ostringstream msg;
     msg << "simulate(t_start=" << t_start << ", t_end=" << t_end
         << "): t_start disagrees with current session time " << session_t
-        << "; pass t_start = sim.current_time() (or call destroy_session/initialize"
-           " to restart at 0)";
+        << "; pass t_start = sim.current_time() (or call initialize(seed, t_start)"
+           " to restart there)";
     throw std::runtime_error(msg.str());
   }
   if (t_end < session_t)
@@ -3762,7 +3773,7 @@ Result RuleMonkeySimulator::simulate(const TimeSpec& ts, const CancelCallback& s
     msg << "simulate(TimeSpec): segment start " << seg_start
         << " disagrees with current session time " << session_t
         << "; pass the current session time as t_start / sample_times[0]"
-           " (or destroy_session/initialize to restart at 0)";
+           " (or initialize(seed, t_start) to restart there)";
     throw std::runtime_error(msg.str());
   }
   const double seg_end = ts.sample_times.empty() ? ts.t_end : ts.sample_times.back();

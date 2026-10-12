@@ -28,10 +28,13 @@ public:
   Engine(Engine&&) = delete;
   Engine& operator=(Engine&&) = delete;
 
-  // Initialize agent pool from seed species; compute initial propensities.
-  void initialize();
+  // Initialize agent pool from seed species with the clock at `t_start`;
+  // compute initial propensities there.
+  void initialize(double t_start = 0.0);
 
   // Run SSA from current time, recording observable values at sample points.
+  // An engine not yet initialized is initialized at `ts.t_start` first, so
+  // the seed state sits there (issue #98).
   // `should_continue`, if non-empty, is polled inside the SSA loop; returning
   // false throws `rulemonkey::Cancelled` out of run() at a safe between-event
   // point (no partial event state is left exposed).

@@ -7,7 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A run's seed state now sits at `t_start` (issue #98).** `run(ts)` with
+  `ts.t_start > 0` used to start the clock at 0, simulate `[0, t_start]`,
+  and record its first row at `t_start` from whatever that stretch left. A
+  run asked for `[5, 7]` ran 7 time units, and its first row was not the
+  seed state. This matched neither BNG's network `simulate`
+  (`run_network -i t_start`, absolute time from the current state) nor
+  `simulate_nf` (NFsim's clock from 0, elapsed time). Since #86 a rate
+  that reads `time()` is integrated, so where the clock starts decides the
+  answer. With `0 -> B() 100*time()` over `[5, 7]`, the mean of `B` over
+  100 seeds was 1254 at t = 5 and 2455 at t = 7. It is now 0 and 1203,
+  where the network's answer is 0 and 1200.
+
+  The seed state now sits at `t_start` on the model's clock, as in BNG's
+  network `simulate`. Sessions take the same origin from the new
+  `initialize(seed, t_start = 0)`, which they could not do before:
+  `initialize()` put the clock at 0, and `simulate()` refuses a `t_start`
+  that disagrees with the session. `parameter_scan` starts each fresh point
+  at `per_point.t_start`, and a carry-over chain (`reset_conc = false`,
+  `bifurcate`) starts its first point there. With `t_start > 0`, a fresh
+  point used to run `[0, t_end]` while a chain's first point ran
+  `[0, t_end - t_start]`. `rm_driver --t-start` now does the same with or
+  without `--save-state` / `--species`; its session path used to refuse a
+  nonzero value.
+
+  A run with `t_start = 0`, which is every corpus, reference and harness
+  run, is unchanged: `rm_driver --print-functions` output is
+  byte-identical to `main` on all 237 XMLs under `tests/`, two seeds
+  each. `clock_origin_test` pins the means, the seed state on the first
+  row, a session matching the one-shot run draw for draw, and both kinds
+  of scan.
+
 ### Fixed
+
+- **`run()` accepted a window that ends before it starts.** `run({7, 5, n})`
+  ran nothing and labelled one state with every sample time.
+  `simulate()` and `parameter_scan` already refuse such a window, and
+  `run()` now refuses it too. A failed `initialize()` now leaves no
+  session active, rather than one that was never initialized.
 
 - **A whole-species delete fired once per matching molecule, not once per
   species.** A rule that drops every molecule of a reactant pattern without

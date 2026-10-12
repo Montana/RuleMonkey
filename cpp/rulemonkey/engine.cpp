@@ -12058,7 +12058,18 @@ canonical::ComplexGraph pattern_to_complex_graph(const Pattern& pat) {
 
 } // namespace
 
-void Engine::initialize() {
+void Engine::initialize(double t_start) {
+  // The seed state sits at `t_start` (issue #98).  The clock is set first:
+  // init_rule_states evaluates every rate law, and one that reads time()
+  // must start from its value at t_start, as load_state's does from the
+  // saved time.
+  if (!std::isfinite(t_start)) {
+    std::ostringstream msg;
+    msg << "initialize: t_start must be finite, got " << t_start;
+    throw std::runtime_error(msg.str());
+  }
+  impl_->current_time = t_start;
+  ++impl_->eval_vars_gen; // time moved → invalidate cached eval_vars_flat
   impl_->init_species();
   // Tracker first.  Building its tables costs exactly the per-molecule
   // embedding counts an observable full-walk costs, so seeding
@@ -12078,7 +12089,7 @@ void Engine::initialize() {
 
 Result Engine::run(const TimeSpec& ts, const CancelCallback& should_continue) {
   if (!impl_->initialized)
-    initialize();
+    initialize(ts.t_start);
   return impl_->run_ssa(ts, should_continue);
 }
 
