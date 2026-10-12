@@ -917,6 +917,11 @@ private:
 // shorthand pattern like L(s!+,s) on a 3-site L with one free site over-
 // counts each ligand by the number of ways to assign the non-reacting
 // `!+` component to the ligand's bonded sites.
+//
+// An EMPTY list collapses every embedding into one: the molecule itself is
+// the reaction center — a rule that deletes it and touches none of its
+// components — so every embedding is the same reaction (issue #88; `A(b)
+// -> 0 DeleteMolecules` on an A(b,b) fired 2x).  Pass null for no collapse.
 int count_embeddings_single(const AgentPool& pool, int mol_id, const PatternMolecule& pm,
                             const Model& model,
                             std::vector<std::vector<int>>* all_assignments = nullptr,
@@ -1034,7 +1039,7 @@ int count_embeddings_single(const AgentPool& pool, int mol_id, const PatternMole
   // Deduplicate by reacting-component targets if requested.
   // Two embeddings that send all `reacting_local` pattern components to the
   // same molecule-side component indices are the same physical reaction.
-  if (reacting_local && !reacting_local->empty() && all_assignments && count > 1) {
+  if (reacting_local && all_assignments && count > 1) {
     std::set<std::vector<int>> seen;
     std::vector<std::vector<int>> deduped;
     deduped.reserve(all_assignments->size());
@@ -1050,7 +1055,7 @@ int count_embeddings_single(const AgentPool& pool, int mol_id, const PatternMole
     }
     *all_assignments = std::move(deduped);
     count = static_cast<int>(all_assignments->size());
-  } else if (reacting_local && !reacting_local->empty() && count > 1) {
+  } else if (reacting_local && count > 1) {
     // Count-only path: recompute count via explicit enumeration with dedup.
     std::set<std::vector<int>> seen;
     std::vector<int> tmp(n_pat, -1);
@@ -1980,14 +1985,339 @@ constexpr bool kSpeciesIncrObs = true;
 // count_2mol_1bond_fc instead of the generic BFS.
 constexpr bool kObsFastMatch = true;
 
-// Fast multi-molecule embedding count using pre-computed adjacency.
+// ---------------------------------------------------------------------------
+// Reaction instances of one reactant slot (issue #88).
+//
+// BioNetGen counts a rule's reactions by their REACTION CENTER: the
+// components whose state or bond the rule changes and the molecules it
+// deletes (RxnRule::find_reaction_center in BNG2's RxnRule.pm).  Two matches
+// of a reactant pattern into one species that put the center on the same
+// components and molecules are one reaction however they differ elsewhere —
+// same reactants, same products, same transformation — and
+// filter_identical_by_rxn_center keeps only one of them.  The symmetry factor
+// BNG2 writes into the XML then covers just the automorphisms that move the
+// center itself.
+//
+// RuleMonkey counts a slot per SEED molecule and sums over seeds.  That sum
+// is BNG2's count only if no center image can be reached from two seeds,
+// which holds when the seed is itself in the center: the image then names
+// the seed.  So slot_seed puts the seed there — NFsim, too, heads each
+// reactant at a molecule the rule transforms (ReactionClass's constructor,
+// reactionClass.cpp) — and the complete embeddings from one seed are
+// collapsed by their image.
+// Seeding on the slot's first pattern molecule instead double counted
+// whenever that molecule was untransformed context and two of them reached
+// the same center: `L(r!1,r!2).R(l!1,s~0).R(l!2) -> ...` fired 2x on an R
+// linked through two L, while the same graph written R first fired 1x.  And
+// collapsing on the seed molecule's own center components alone was not
+// the same collapse either: it merged matches whose center differs on
+// another molecule, and it kept the first seed embedding of each group
+// whether or not that one reached a whole match.
+// ---------------------------------------------------------------------------
+struct SlotCenter {
+  // (pattern molecule, local component) of every component in the slot whose
+  // state or bond the rule changes.
+  std::vector<std::pair<int, int>> comps;
+  // Pattern molecules in the slot the rule deletes.  A whole-species delete
+  // is carried by the molecule fire_rule anchors it at.
+  std::vector<int> mols;
+
+  bool empty() const { return comps.empty() && mols.empty(); }
+  bool has_mol(int mi) const {
+    if (std::find(mols.begin(), mols.end(), mi) != mols.end())
+      return true;
+    return std::any_of(comps.begin(), comps.end(),
+                       [mi](const std::pair<int, int>& c) { return c.first == mi; });
+  }
+};
+
+// The reaction center of the slot spanning pattern molecules [start, end),
+// read off the rule's operations.
+SlotCenter slot_center(const Rule& rule, int start, int end) {
+  SlotCenter c;
+  const auto& pat = rule.reactant_pattern;
+  auto add_flat = [&](int flat) {
+    if (flat < 0)
+      return;
+    int base = 0;
+    for (int mi = 0; mi < static_cast<int>(pat.molecules.size()); ++mi) {
+      int const nc = static_cast<int>(pat.molecules[mi].components.size());
+      if (flat < base + nc) {
+        std::pair<int, int> const mc{mi, flat - base};
+        if (mi >= start && mi < end &&
+            std::find(c.comps.begin(), c.comps.end(), mc) == c.comps.end())
+          c.comps.push_back(mc);
+        return;
+      }
+      base += nc;
+    }
+  };
+  for (const auto& op : rule.operations) {
+    switch (op.type) {
+    case OpType::StateChange:
+      add_flat(op.comp_flat);
+      break;
+    case OpType::AddBond:
+    case OpType::DeleteBond:
+      add_flat(op.comp_flat_a);
+      add_flat(op.comp_flat_b);
+      break;
+    case OpType::DeleteMolecule: {
+      int const mi = op.delete_pattern_mol_idx;
+      if (mi >= start && mi < end && std::find(c.mols.begin(), c.mols.end(), mi) == c.mols.end())
+        c.mols.push_back(mi);
+      break;
+    }
+    case OpType::AddMolecule:
+      break; // product side only
+    }
+  }
+  return c;
+}
+
+// The slot's counting seed: the pattern molecule its matches are enumerated
+// from, and the one its per-molecule bookkeeping (mol_data, the samplers, a
+// per-molecule local rate) is kept against.
+//
+//   * A slot carrying a per-molecule local-function tag seeds at the tagged
+//     molecule, because the engine evaluates that factor at the seed.  When
+//     the tag sits on context, the instances are then the (tagged molecule,
+//     center image) pairs, each priced at its own tag — NFsim's reading as
+//     well, since its mapping set carries the tag and checkForEquality
+//     compares molecules.
+//   * Otherwise the first pattern molecule in the center, for the reason
+//     given above.  A slot that already lists one first keeps its seed.
+//   * A slot with no center is pure context and is counted per complex
+//     (issue #33); it keeps its first molecule.
+int slot_seed(int start, int end, const SlotCenter& center, int tag_mol) {
+  if (tag_mol >= start && tag_mol < end)
+    return tag_mol;
+  for (int mi = start; mi < end; ++mi)
+    if (center.has_mol(mi))
+      return mi;
+  return start;
+}
+
+// Call on_complete(seed_emb, mols, comps) for every complete embedding of
+// pattern molecules [pat_start, pat_end) that places `seed_pat_idx` on
+// `seed_mol_id`.  `seed_emb` indexes the seed's embeddings in
+// count_embeddings_single order; `mols` / `comps` are indexed by pattern
+// molecule.  Unlike the BFS in count_multi_mol_fast_generic, which commits to
+// the first partner embedding consistent with the bond it walked, this
+// branches over all of them, so a partner with symmetric components offers
+// every way it can fill the rest of the pattern.  Returns the number of seed
+// embeddings.
+template <class OnComplete>
+int walk_slot_embeddings(const AgentPool& pool, int seed_mol_id, const Pattern& pat,
+                         const Model& model, int pat_start, int pat_end, int seed_pat_idx,
+                         const PatternAdj& pa, const OnComplete& on_complete) {
+  std::vector<std::vector<int>> seed_embs;
+  count_embeddings_single(pool, seed_mol_id, pat.molecules[seed_pat_idx], model, &seed_embs);
+  int const n_seed = static_cast<int>(seed_embs.size());
+  if (n_seed == 0)
+    return 0;
+
+  int const n_pat_mols = static_cast<int>(pat.molecules.size());
+  std::vector<int> mols(n_pat_mols, -1);
+  std::vector<std::vector<int>> comps(n_pat_mols);
+  int cur_seed = -1;
+
+  auto placed = [&](int mol_id) {
+    for (int p = pat_start; p < pat_end; ++p)
+      if (mols[p] == mol_id)
+        return true;
+    return false;
+  };
+  auto comp_of = [&](int p, int local) { return pool.molecule(mols[p]).comp_ids[comps[p][local]]; };
+  // Each molecule is placed through one bond, so a ring's closing bond is
+  // only checked here, once everything is placed.
+  auto bonds_hold = [&]() {
+    for (int p = pat_start; p < pat_end; ++p)
+      for (const auto& ae : pa.adj[p])
+        if (ae.other_mol > p && pool.component(comp_of(p, ae.my_local)).bond_partner !=
+                                    comp_of(ae.other_mol, ae.other_local))
+          return false;
+    return true;
+  };
+
+  auto extend = [&](auto& self) -> void {
+    // A pattern molecule bonded to a placed one is fixed by that bond; its
+    // embeddings that put the bond on the right component are the branches.
+    for (int p = pat_start; p < pat_end; ++p) {
+      if (mols[p] < 0)
+        continue;
+      for (const auto& ae : pa.adj[p]) {
+        int const q = ae.other_mol;
+        if (mols[q] >= 0)
+          continue;
+        int const partner_comp = pool.component(comp_of(p, ae.my_local)).bond_partner;
+        if (partner_comp < 0)
+          return;
+        int const partner = pool.mol_of_comp(partner_comp);
+        if (pool.molecule(partner).type_index != pat.molecules[q].type_index || placed(partner))
+          return;
+        const auto& pcomps = pool.molecule(partner).comp_ids;
+        int const partner_local = static_cast<int>(
+            std::find(pcomps.begin(), pcomps.end(), partner_comp) - pcomps.begin());
+        std::vector<std::vector<int>> embs;
+        count_embeddings_single(pool, partner, pat.molecules[q], model, &embs);
+        mols[q] = partner;
+        for (auto& e : embs) {
+          if (ae.other_local >= static_cast<int>(e.size()) || e[ae.other_local] != partner_local)
+            continue;
+          comps[q] = std::move(e);
+          self(self);
+        }
+        mols[q] = -1;
+        comps[q].clear();
+        return;
+      }
+    }
+    // Whatever is left has no bond path from the seed (a `.`-joined
+    // molecule) and may be any molecule of the seed's complex.
+    for (int q = pat_start; q < pat_end; ++q) {
+      if (mols[q] >= 0)
+        continue;
+      for (int const cand : pool.molecules_in_complex(pool.complex_of(seed_mol_id))) {
+        mols[q] = -1;
+        if (!pool.molecule(cand).active ||
+            pool.molecule(cand).type_index != pat.molecules[q].type_index || placed(cand))
+          continue;
+        std::vector<std::vector<int>> embs;
+        count_embeddings_single(pool, cand, pat.molecules[q], model, &embs);
+        mols[q] = cand;
+        for (auto& e : embs) {
+          comps[q] = std::move(e);
+          self(self);
+        }
+      }
+      mols[q] = -1;
+      comps[q].clear();
+      return;
+    }
+    if (bonds_hold())
+      on_complete(cur_seed, mols, comps);
+  };
+
+  for (cur_seed = 0; cur_seed < n_seed; ++cur_seed) {
+    mols[seed_pat_idx] = seed_mol_id;
+    comps[seed_pat_idx] = std::move(seed_embs[cur_seed]);
+    extend(extend);
+  }
+  return n_seed;
+}
+
+// Where a complete embedding puts the slot's center: the actual component
+// for each center component, then the actual molecule for each deleted one.
+void center_image(const AgentPool& pool, const SlotCenter& center, const std::vector<int>& mols,
+                  const std::vector<std::vector<int>>& comps, std::vector<int>& key) {
+  key.clear();
+  for (const auto& [mi, local] : center.comps)
+    key.push_back(pool.molecule(mols[mi]).comp_ids[comps[mi][local]]);
+  for (int const mi : center.mols)
+    key.push_back(mols[mi]);
+}
+
+// Reaction instances of a multi-molecule slot seeded at `seed_mol_id`: the
+// distinct center images over its complete embeddings.  `center` is not
+// empty — a slot with no center is pure context, counted per complex.
+int count_slot_instances(const AgentPool& pool, int seed_mol_id, const Pattern& pat,
+                         const Model& model, int pat_start, int pat_end, int seed_pat_idx,
+                         const PatternAdj& pa, const SlotCenter& center) {
+  std::vector<std::vector<int>> seen;
+  std::vector<int> key;
+  walk_slot_embeddings(
+      pool, seed_mol_id, pat, model, pat_start, pat_end, seed_pat_idx, pa,
+      [&](int, const std::vector<int>& mols, const std::vector<std::vector<int>>& comps) {
+        center_image(pool, center, mols, comps, key);
+        if (std::find(seen.begin(), seen.end(), key) == seen.end())
+          seen.push_back(key);
+      });
+  return static_cast<int>(seen.size());
+}
+
+// The same instances as count_slot_instances, for the samplers, with every
+// complete embedding kept: where it landed, the seed embedding it grew
+// from, and the instance (center image) it belongs to.
+struct SlotInstances {
+  int n_seed_embs = 0;
+  std::vector<std::vector<int>> mols; // per complete embedding, by pattern molecule
+  std::vector<std::vector<std::vector<int>>> comps;
+  std::vector<int> seed_emb;
+  std::vector<int> instance;
+  std::vector<std::vector<int>> keys; // per instance, its center image
+  std::vector<int> first;             // per instance, its first complete embedding
+
+  int size() const { return static_cast<int>(keys.size()); }
+
+  // Is a uniform draw over the seed embeddings that reach a whole match a
+  // uniform draw over the instances?  Yes when no seed embedding reaches
+  // two whole matches and every instance is reached through equally many
+  // seed embeddings — the case the pre-#88 samplers drew exactly, which
+  // keeps its draw sequence (an L(r!1,r!+,r!+).R(l!1) unbinding on a fully
+  // bound trivalent L: six seed embeddings, two per instance).
+  bool seed_draw_is_uniform() const {
+    std::vector<int> reach(keys.size(), 0);
+    for (std::size_t e = 0; e < instance.size(); ++e) {
+      if (e > 0 && seed_emb[e] == seed_emb[e - 1])
+        return false;
+      ++reach[instance[e]];
+    }
+    return std::all_of(reach.begin(), reach.end(), [&](int r) { return r == reach.front(); });
+  }
+};
+
+SlotInstances collect_slot_instances(const AgentPool& pool, int seed_mol_id, const Pattern& pat,
+                                     const Model& model, int pat_start, int pat_end,
+                                     int seed_pat_idx, const PatternAdj& pa,
+                                     const SlotCenter& center) {
+  SlotInstances out;
+  std::vector<int> key;
+  out.n_seed_embs = walk_slot_embeddings(
+      pool, seed_mol_id, pat, model, pat_start, pat_end, seed_pat_idx, pa,
+      [&](int se, const std::vector<int>& mols, const std::vector<std::vector<int>>& comps) {
+        center_image(pool, center, mols, comps, key);
+        int const e = static_cast<int>(out.mols.size());
+        auto it = std::find(out.keys.begin(), out.keys.end(), key);
+        int const inst = static_cast<int>(it - out.keys.begin());
+        if (it == out.keys.end()) {
+          out.keys.push_back(key);
+          out.first.push_back(e);
+        }
+        out.mols.push_back(mols);
+        out.comps.push_back(comps);
+        out.seed_emb.push_back(se);
+        out.instance.push_back(inst);
+      });
+  return out;
+}
+
+// Does the 2-mol-1-bond fast path's count equal the slot's instance count?
+// It counts one per seed bond candidate whose partner matches, which is one
+// per complete embedding.  Those are distinct instances when the seed type
+// is not symmetric (one candidate at most) or the bond endpoint is itself in
+// the center; and a pure-context slot wants every embedding anyway.  What
+// is left — a symmetric seed in the center only as a deleted or tagged
+// molecule — can reach one instance through two candidates, and takes the
+// unspecialized path.
+bool fastmatch_counts_instances(const FastMatchSlot& fm, const SlotCenter& center,
+                                const Model& model) {
+  if (center.empty() || !model.molecule_types[fm.seed_type].has_symmetric_components())
+    return true;
+  std::pair<int, int> const endpoint{fm.seed_pat_idx, fm.seed_bond_pi};
+  return std::find(center.comps.begin(), center.comps.end(), endpoint) != center.comps.end();
+}
+
+// A rule slot's count at one seed molecule, using pre-computed adjacency.
 // When `fm` is non-null and fm->enabled is true, dispatches to the
-// 2-mol-1-bond-fully-constrained specialized matcher.
+// 2-mol-1-bond-fully-constrained specialized matcher.  Otherwise a slot with
+// a reaction center counts its reaction instances (count_slot_instances),
+// and a pure-context slot — `center` null or empty — keeps the generic BFS
+// below, which only has to say whether, and how often, the context matches.
 int count_multi_mol_fast(const AgentPool& pool, int seed_mol_id, const Pattern& pat,
                          const Model& model, int pat_start, int pat_end, int seed_pat_idx,
                          const PatternAdj& pa, CountMultiProfile* cm_prof, CmmFcProfile* fc_prof,
-                         const FastMatchSlot* fm = nullptr,
-                         const std::vector<int>* reacting_local = nullptr);
+                         const FastMatchSlot* fm = nullptr, const SlotCenter* center = nullptr);
 
 // Generic body extracted so the dispatcher can call it for the invariant-gate
 // comparison without recursing through the dispatch.
@@ -1998,18 +2328,13 @@ int count_multi_mol_fast(const AgentPool& pool, int seed_mol_id, const Pattern& 
 // `if constexpr` and the increment sites compile to nothing in default
 // builds, so the parameter has no runtime cost there.
 //
-// `reacting_local`, when supplied, is forwarded to the seed-side
-// count_embeddings_single call so that injective embeddings sending all
-// reacting pattern components to the same molecule components collapse to
-// one. This dedup is what differentiates a 2-mol unimolecular RULE rate
-// (where embeddings differing only in non-reacting sym slots produce the
-// same physical reaction) from a Molecules OBSERVABLE count (which keeps
-// every embedding). Mirrors the dedup the single-mol path applies via
-// count_embeddings_single's reacting_local argument.
+// Counts every complete embedding, collapsing nothing: only pure-context
+// slots reach it, and they are counted per complex (issue #33).  It used to
+// collapse a transformed slot's seed embeddings on the seed's own reacting
+// components; count_slot_instances replaced that (issue #88).
 int count_multi_mol_fast_generic(const AgentPool& pool, int seed_mol_id, const Pattern& pat,
                                  const Model& model, int pat_start, int pat_end, int seed_pat_idx,
-                                 const PatternAdj& pa, CountMultiProfile* cm_prof,
-                                 const std::vector<int>* reacting_local = nullptr) {
+                                 const PatternAdj& pa, CountMultiProfile* cm_prof) {
 
   // -- profiling scaffolding (gated) --
   using cm_clock = std::chrono::steady_clock;
@@ -2062,8 +2387,7 @@ int count_multi_mol_fast_generic(const AgentPool& pool, int seed_mol_id, const P
   }
 
   std::vector<std::vector<int>> seed_embs;
-  count_embeddings_single(pool, seed_mol_id, pat.molecules[seed_pat_idx], model, &seed_embs,
-                          reacting_local);
+  count_embeddings_single(pool, seed_mol_id, pat.molecules[seed_pat_idx], model, &seed_embs);
   if constexpr (kCountMultiProfile) {
     if (cm_sampled) {
       auto now = cm_clock::now();
@@ -2273,23 +2597,30 @@ int count_multi_mol_fast_generic(const AgentPool& pool, int seed_mol_id, const P
 
 // Dispatcher: if a FastMatchSlot is enabled for this (rule, pattern-side),
 // run the specialized 2-mol-1-bond-fc path; otherwise fall through to the
-// generic BFS.  When kFastMatchInvariant is true, both paths run and are
-// compared — any mismatch aborts with diagnostics so we catch
-// specialization bugs before they silently corrupt propensities.
+// reaction-instance count, or for a pure-context slot to the generic BFS.
+// When kFastMatchInvariant is true, the specialization and the path it
+// stands in for both run and are compared — any mismatch aborts with
+// diagnostics so we catch specialization bugs before they silently corrupt
+// propensities.
 int count_multi_mol_fast(const AgentPool& pool, int seed_mol_id, const Pattern& pat,
                          const Model& model, int pat_start, int pat_end, int seed_pat_idx,
                          const PatternAdj& pa, CountMultiProfile* cm_prof, CmmFcProfile* fc_prof,
-                         const FastMatchSlot* fm, const std::vector<int>* reacting_local) {
+                         const FastMatchSlot* fm, const SlotCenter* center) {
   if constexpr (kCountMultiProfile)
     cm_prof->calls++;
+  auto unspecialized = [&]() {
+    if (center && !center->empty())
+      return count_slot_instances(pool, seed_mol_id, pat, model, pat_start, pat_end, seed_pat_idx,
+                                  pa, *center);
+    return count_multi_mol_fast_generic(pool, seed_mol_id, pat, model, pat_start, pat_end,
+                                        seed_pat_idx, pa, cm_prof);
+  };
   if (fm && fm->enabled) {
     if constexpr (kCountMultiProfile)
       cm_prof->fm_hits++;
     int const specialized = count_2mol_1bond_fc(pool, seed_mol_id, *fm, fc_prof);
     if (kFastMatchInvariant) {
-      int const generic =
-          count_multi_mol_fast_generic(pool, seed_mol_id, pat, model, pat_start, pat_end,
-                                       seed_pat_idx, pa, cm_prof, reacting_local);
+      int const generic = unspecialized();
       if (generic != specialized) {
         std::fprintf(stderr,
                      "[FastMatch mismatch] seed_mol=%d seed_type=%d partner_type=%d "
@@ -2301,8 +2632,7 @@ int count_multi_mol_fast(const AgentPool& pool, int seed_mol_id, const Pattern& 
     }
     return specialized;
   }
-  return count_multi_mol_fast_generic(pool, seed_mol_id, pat, model, pat_start, pat_end,
-                                      seed_pat_idx, pa, cm_prof, reacting_local);
+  return unspecialized();
 }
 
 // Compute the diameter (max shortest-path distance between any two molecules)
@@ -2638,16 +2968,24 @@ struct NaryState {
 
   // Per-slot embedding counts, [slot][mol_id].  Slot i is reactant pattern
   // i, spanning pattern molecules [slot_start[i], slot_end[i]); its seed is
-  // `slot_start[i]` and counts[i][m] is the number of embeddings of the
-  // whole sub-pattern that place that seed on molecule m.
+  // `slot_seed[i]` (see slot_seed — issue #88) and counts[i][m] is the
+  // number of reaction instances of the whole sub-pattern that place that
+  // seed on molecule m.
   std::vector<std::vector<int>> counts;
   std::vector<int> slot_start;
   std::vector<int> slot_end;
+  std::vector<int> slot_seed;
   std::vector<char> slot_multi;                 // span > 1: a `.`-joined complex
   std::vector<PatternAdj> slot_adj;             // bond adjacency, multi-molecule slots
   bool any_multi = false;                       // any slot spans > 1 molecule
   std::vector<int> slot_type_index;             // molecule type of the seed, per slot
-  std::vector<std::vector<int>> reacting_local; // per-slot reacting components
+  std::vector<SlotCenter> center;               // per-slot reaction center
+  std::vector<std::vector<int>> reacting_local; // per-slot reacting components on the seed
+  std::vector<char> seed_in_center;             // per slot, as RuleState::seed_in_center_a
+
+  const std::vector<int>* seed_dedup(int slot) const {
+    return seed_in_center[slot] != 0 ? &reacting_local[slot] : nullptr;
+  }
 
   // Pure-context slots, counted once per matching COMPLEX (issue #42).
   //
@@ -2879,12 +3217,35 @@ struct RuleState {
   // enabled=false and cmm falls through to the generic path.
   FastMatchSlot fm_a;
   FastMatchSlot fm_b;
+  // Counting seed of slot A / B: the pattern molecule the slot's matches are
+  // enumerated from and its per-molecule rows are kept against — in the
+  // reaction center, or on a per-molecule tag (issue #88; see slot_seed).
+  // Not the slot's first molecule in general; reactant_pattern_starts still
+  // bounds the slot.
+  int seed_pat_a = 0;
+  int seed_pat_b = -1;
+  // Each slot's reaction center (see SlotCenter).  A multi-molecule slot
+  // with a non-empty center counts reaction instances; an empty one is pure
+  // context.
+  SlotCenter center_a;
+  SlotCenter center_b;
   // Local (within-seed-molecule) indices of pattern components that are
   // operated on by the rule.  Used to deduplicate injective embeddings that
   // differ only in which non-reacting pattern components target which
   // molecule components.  See count_embeddings_single's reacting_local param.
   std::vector<int> reacting_local_a;
   std::vector<int> reacting_local_b;
+  bool seed_in_center_a = false;
+  bool seed_in_center_b = false;
+  // The collapse a single-molecule slot's seed embeddings take: on the
+  // reacting components when the seed is in the center (an empty list when
+  // it is in it only as a deleted molecule), none when it is pure context.
+  const std::vector<int>* seed_dedup_a() const {
+    return seed_in_center_a ? &reacting_local_a : nullptr;
+  }
+  const std::vector<int>* seed_dedup_b() const {
+    return seed_in_center_b ? &reacting_local_b : nullptr;
+  }
 
   // Relevant-component bitmask (P1 embedding cache, step 1).  Bit i is set
   // iff component i of the A-seed (or B-seed) molecule type is referenced
@@ -3022,12 +3383,12 @@ int rule_table_reach(const AgentPool& pool, const Rule& rule, const RuleState& r
     return r;
   }
   const auto& mols = rule.reactant_pattern.molecules;
-  int const seed_a = rule.reactant_pattern_starts.empty() ? 0 : rule.reactant_pattern_starts[0];
+  int const seed_a = rs.seed_pat_a;
   if (seed_a >= static_cast<int>(mols.size()))
     return 0; // no seed molecule, so no table at all (#68)
   int r = type_reach(mols[seed_a].type_index);
   if (rule.molecularity >= 2 && rule.reactant_pattern_starts.size() > 1) {
-    int const seed_b = rule.reactant_pattern_starts[1];
+    int const seed_b = rs.seed_pat_b;
     if (seed_b >= 0 && seed_b < static_cast<int>(mols.size()))
       r = std::max(r, type_reach(mols[seed_b].type_index));
   }
@@ -3331,6 +3692,20 @@ void compute_shared_components(const AgentPool& pool, int mol_id, const Rule& ru
 // Engine implementation
 // ===========================================================================
 
+// First and one-past-last pattern molecule of slot 0 (A) or 1 (B) on the
+// two-slot path.  The slot's seed is RuleState::seed_pat_a/_b, which need
+// not be its first molecule (issue #88).
+int slot_begin(const Rule& rule, int slot) {
+  if (slot == 0)
+    return rule.reactant_pattern_starts.empty() ? 0 : rule.reactant_pattern_starts[0];
+  return (rule.reactant_pattern_starts.size() > 1) ? rule.reactant_pattern_starts[1] : -1;
+}
+int slot_end(const Rule& rule, int slot) {
+  if (slot == 0 && rule.reactant_pattern_starts.size() > 1)
+    return rule.reactant_pattern_starts[1];
+  return static_cast<int>(rule.reactant_pattern.molecules.size());
+}
+
 // Determine the binding site local component indices for a bimolecular rule.
 // Returns (seed_mol_a, bind_local_a, seed_mol_b, bind_local_b).
 struct BindInfo {
@@ -3399,6 +3774,21 @@ struct ReactionMatch {
   std::vector<int> mol_ids;  // pattern mol idx -> actual mol_id
   std::vector<int> comp_ids; // flat pattern comp idx -> actual comp_id
 };
+
+// Lay complete embedding `e` of `si` down in `m` over pattern molecules
+// [pat_start, pat_end): the molecule each pattern molecule landed on and the
+// component each pattern component did.
+void apply_slot_embedding(const AgentPool& pool, const Pattern& pat, int pat_start, int pat_end,
+                          const SlotInstances& si, int e, ReactionMatch& m) {
+  for (int p = pat_start; p < pat_end; ++p) {
+    int const mol = si.mols[e][p];
+    m.mol_ids[p] = mol;
+    int const flat_base = pat.flat_index(p, 0);
+    const auto& cmap = si.comps[e][p];
+    for (int ci = 0; ci < static_cast<int>(cmap.size()); ++ci)
+      m.comp_ids[flat_base + ci] = pool.molecule(mol).comp_ids[cmap[ci]];
+  }
+}
 
 // The sole engine -> canonical-labeler bridge (plan §4); defined far
 // below, after the pattern-matching machinery.  Forward-declared here so
@@ -4643,10 +5033,11 @@ struct Engine::Impl {
     pool.cx_edits_.clear();
   }
 
-  // Embedding overcounting is now corrected at count time inside
-  // count_embeddings_single via its `reacting_local` parameter (passed
-  // from rs.reacting_local_a/_b for both single-mol and multi-mol
-  // paths).  The previous compile-time pattern-automorphism correction
+  // Embedding overcounting is now corrected at count time: inside
+  // count_embeddings_single via its `reacting_local` parameter for a
+  // single-molecule slot (rs.seed_dedup_a/_b), and on whole matches by
+  // count_slot_instances for a multi-molecule one (issue #88).  The
+  // previous compile-time pattern-automorphism correction
   // (compute_embedding_correction[_multimol]) duplicated that work and
   // halved the rate when both fired, so it has been removed.
   // embedding_correction_a / _b are kept at 1.0 throughout.
@@ -4733,41 +5124,44 @@ struct Engine::Impl {
                             ? rule.reactant_pattern_starts[1]
                             : static_cast<int>(rule.reactant_pattern.molecules.size());
 
+      // Each slot's reaction center and the seed it is counted from (issue
+      // #88 — see SlotCenter and slot_seed).  The seed is the slot's first
+      // molecule unless that molecule is context.
+      int const n_rp_mols = static_cast<int>(rule.reactant_pattern.molecules.size());
+      rs.center_a = slot_center(rule, start_a, end_a);
+      rs.seed_pat_a = (start_a < n_rp_mols)
+                          ? slot_seed(start_a, end_a, rs.center_a, rule.rate_law.local_tag_mol)
+                          : start_a;
+      rs.center_b = SlotCenter{};
+      rs.seed_pat_b = -1;
+      if (rule.molecularity >= 2 && rule.reactant_pattern_starts.size() > 1) {
+        int const start_b = rule.reactant_pattern_starts[1];
+        int const end_b =
+            (rule.reactant_pattern_starts.size() > 2) ? rule.reactant_pattern_starts[2] : n_rp_mols;
+        rs.center_b = slot_center(rule, start_b, end_b);
+        rs.seed_pat_b = slot_seed(start_b, end_b, rs.center_b, rule.rate_law.local_tag_mol_b);
+      }
+
       // Collect reacting-component LOCAL indices within the seed molecules of
       // each reactant pattern.  These drive embedding deduplication in
       // count_embeddings_single so that multiple injective mappings which
       // send the same reacting pattern components to the same molecule
       // components collapse to one physical reaction.  See the comment on
       // count_embeddings_single for the motivation (NFsim's checkForEquality).
-      rs.reacting_local_a.clear();
-      rs.reacting_local_b.clear();
-      {
-        std::unordered_set<int> flat_reacting;
-        for (auto& op : rule.operations) {
-          if (op.comp_flat >= 0)
-            flat_reacting.insert(op.comp_flat);
-          if (op.comp_flat_a >= 0)
-            flat_reacting.insert(op.comp_flat_a);
-          if (op.comp_flat_b >= 0)
-            flat_reacting.insert(op.comp_flat_b);
-        }
-        int flat_base = 0;
-        for (int mi = 0; mi < static_cast<int>(rule.reactant_pattern.molecules.size()); ++mi) {
-          int const nc = static_cast<int>(rule.reactant_pattern.molecules[mi].components.size());
-          if (mi == start_a) {
-            for (int ci = 0; ci < nc; ++ci)
-              if (flat_reacting.count(flat_base + ci))
-                rs.reacting_local_a.push_back(ci);
-          }
-          if (rule.molecularity >= 2 && rule.reactant_pattern_starts.size() > 1 &&
-              mi == rule.reactant_pattern_starts[1]) {
-            for (int ci = 0; ci < nc; ++ci)
-              if (flat_reacting.count(flat_base + ci))
-                rs.reacting_local_b.push_back(ci);
-          }
-          flat_base += nc;
-        }
-      }
+      // A multi-molecule slot collapses whole matches on its whole center
+      // instead (count_slot_instances).
+      auto seed_reacting = [](const SlotCenter& c, int seed) {
+        std::vector<int> out;
+        for (const auto& [mi, local] : c.comps)
+          if (mi == seed)
+            out.push_back(local);
+        std::sort(out.begin(), out.end());
+        return out;
+      };
+      rs.reacting_local_a = seed_reacting(rs.center_a, rs.seed_pat_a);
+      rs.reacting_local_b = seed_reacting(rs.center_b, rs.seed_pat_b);
+      rs.seed_in_center_a = rs.center_a.has_mol(rs.seed_pat_a);
+      rs.seed_in_center_b = rs.seed_pat_b >= 0 && rs.center_b.has_mol(rs.seed_pat_b);
 
       // Pure-context reactant patterns (issue #33).  A reactant pattern that
       // NO operation in this rule touches is context: every embedding of it
@@ -4816,8 +5210,8 @@ struct Engine::Impl {
       {
         rs.a_relevant_mask = 0;
         rs.a_mask_complete = false;
-        if (start_a < static_cast<int>(rule.reactant_pattern.molecules.size())) {
-          auto& pm = rule.reactant_pattern.molecules[start_a];
+        if (rs.seed_pat_a < static_cast<int>(rule.reactant_pattern.molecules.size())) {
+          auto& pm = rule.reactant_pattern.molecules[rs.seed_pat_a];
           int const type_idx = pm.type_index;
           if (type_idx >= 0 && type_idx < static_cast<int>(model.molecule_types.size())) {
             int const n_type_comps =
@@ -4855,12 +5249,10 @@ struct Engine::Impl {
       }
 
       // For multi-molecule patterns, use full-match counting (scoped to
-      // each reactant).  Embedding deduplication is done at count time
-      // via count_embeddings_single's reacting_local parameter, applied
-      // to the seed-side enumeration in count_multi_mol_fast_generic.
+      // each reactant): count_multi_mol_fast collapses a slot's whole
+      // matches on its reaction center (count_slot_instances, issue #88).
       // This subsumes the old pattern-automorphism correction for sym
       // non-reacting components — applying both would halve the rate.
-      // Symmetric with the single-mol path below.
       rs.fm_a = FastMatchSlot{};
       rs.fm_b = FastMatchSlot{};
       rs.use_multi_mol_count = (end_a - start_a > 1);
@@ -4872,8 +5264,12 @@ struct Engine::Impl {
         // are explicitly excluded.
         {
           std::string fm_reason;
-          build_fastmatch_slot(rule.reactant_pattern, start_a, end_a, start_a, rs.pat_adj_a, model,
-                               rs.fm_a, kSelectReactantsProfile ? &fm_reason : nullptr);
+          build_fastmatch_slot(rule.reactant_pattern, start_a, end_a, rs.seed_pat_a, rs.pat_adj_a,
+                               model, rs.fm_a, kSelectReactantsProfile ? &fm_reason : nullptr);
+          if (rs.fm_a.enabled && !fastmatch_counts_instances(rs.fm_a, rs.center_a, model)) {
+            rs.fm_a.enabled = false;
+            fm_reason = "center_collapses_seed_candidates";
+          }
           if constexpr (kSelectReactantsProfile) {
             if (!rs.fm_a.enabled) {
               int const n_mols = end_a - start_a;
@@ -4896,9 +5292,9 @@ struct Engine::Impl {
         // contents — incremental_update must expand affected_mols for this rule.
         {
           std::vector<bool> reached(end_a, false);
-          reached[start_a] = true;
+          reached[rs.seed_pat_a] = true;
           std::queue<int> q;
-          q.push(start_a);
+          q.push(rs.seed_pat_a);
           while (!q.empty()) {
             int const cur = q.front();
             q.pop();
@@ -4935,8 +5331,12 @@ struct Engine::Impl {
           rs.pat_adj_b = build_pattern_adjacency(rule.reactant_pattern, start_b, end_b);
           {
             std::string fm_reason;
-            build_fastmatch_slot(rule.reactant_pattern, start_b, end_b, start_b, rs.pat_adj_b,
+            build_fastmatch_slot(rule.reactant_pattern, start_b, end_b, rs.seed_pat_b, rs.pat_adj_b,
                                  model, rs.fm_b, kSelectReactantsProfile ? &fm_reason : nullptr);
+            if (rs.fm_b.enabled && !fastmatch_counts_instances(rs.fm_b, rs.center_b, model)) {
+              rs.fm_b.enabled = false;
+              fm_reason = "center_collapses_seed_candidates";
+            }
             if constexpr (kSelectReactantsProfile) {
               if (!rs.fm_b.enabled) {
                 int const n_mols = end_b - start_b;
@@ -4959,8 +5359,8 @@ struct Engine::Impl {
         // Relevant-component bitmask for the B-seed (mirrors A-side above).
         rs.b_relevant_mask = 0;
         rs.b_mask_complete = false;
-        if (start_b < static_cast<int>(rule.reactant_pattern.molecules.size())) {
-          auto& pm = rule.reactant_pattern.molecules[start_b];
+        if (rs.seed_pat_b < static_cast<int>(rule.reactant_pattern.molecules.size())) {
+          auto& pm = rule.reactant_pattern.molecules[rs.seed_pat_b];
           int const type_idx = pm.type_index;
           if (type_idx >= 0 && type_idx < static_cast<int>(model.molecule_types.size())) {
             int const n_type_comps =
@@ -5051,8 +5451,7 @@ struct Engine::Impl {
         w.last.assign(w.obs_slots.size(), 0.0);
         global_dep_local_rules.push_back(std::move(w));
       }
-      int const seed_a =
-          (!rule.reactant_pattern_starts.empty()) ? rule.reactant_pattern_starts[0] : 0;
+      int const seed_a = rule_states[ri].seed_pat_a;
       if (seed_a >= static_cast<int>(rule.reactant_pattern.molecules.size()))
         continue;
       int const type_a = rule.reactant_pattern.molecules[seed_a].type_index;
@@ -5060,8 +5459,8 @@ struct Engine::Impl {
         type_to_rules[type_a].push_back(ri);
 
       if (rule.molecularity >= 2 && rule.reactant_pattern_starts.size() > 1) {
-        int const seed_b = rule.reactant_pattern_starts[1];
-        if (seed_b < static_cast<int>(rule.reactant_pattern.molecules.size())) {
+        int const seed_b = rule_states[ri].seed_pat_b;
+        if (seed_b >= 0 && seed_b < static_cast<int>(rule.reactant_pattern.molecules.size())) {
           int const type_b = rule.reactant_pattern.molecules[seed_b].type_index;
           if (type_b != type_a && type_b >= 0 && type_b < n_types)
             type_to_rules[type_b].push_back(ri);
@@ -5120,11 +5519,7 @@ struct Engine::Impl {
       for (int slot = 0; slot < 2; ++slot) {
         if (!(slot == 0 ? rs.per_complex_a : rs.per_complex_b))
           continue;
-        int const seed =
-            (slot == 0)
-                ? ((!rule.reactant_pattern_starts.empty()) ? rule.reactant_pattern_starts[0] : 0)
-                : ((rule.reactant_pattern_starts.size() > 1) ? rule.reactant_pattern_starts[1]
-                                                             : -1);
+        int const seed = (slot == 0) ? rs.seed_pat_a : rs.seed_pat_b;
         if (seed < 0 || seed >= static_cast<int>(rule.reactant_pattern.molecules.size()))
           continue;
         int const ti = rule.reactant_pattern.molecules[seed].type_index;
@@ -5228,10 +5623,13 @@ struct Engine::Impl {
     ns.counts.assign(n, {});
     ns.slot_start.assign(n, 0);
     ns.slot_end.assign(n, 0);
+    ns.slot_seed.assign(n, 0);
     ns.slot_multi.assign(n, 0);
     ns.slot_adj.assign(n, PatternAdj{});
     ns.slot_type_index.assign(n, -1);
+    ns.center.assign(n, SlotCenter{});
     ns.reacting_local.assign(n, {});
+    ns.seed_in_center.assign(n, 0);
     ns.subset_totals.assign(std::size_t{1} << n, 0.0);
     ns.slot_context.assign(n, 0);
     ns.percx.assign(n, PerCxTally{});
@@ -5259,31 +5657,22 @@ struct Engine::Impl {
       }
     }
 
-    // Reacting-component local indices per slot, mirroring the
-    // reacting_local_a/_b computation for the two-slot path: they drive
-    // embedding deduplication in count_embeddings_single so that mappings
-    // differing only in which non-reacting component is targeted collapse
-    // to one physical reaction.  Taken on the slot's seed molecule, which is
-    // where both counters enumerate embeddings.
-    std::unordered_set<int> flat_reacting;
-    for (auto& op : rule.operations) {
-      if (op.comp_flat >= 0)
-        flat_reacting.insert(op.comp_flat);
-      if (op.comp_flat_a >= 0)
-        flat_reacting.insert(op.comp_flat_a);
-      if (op.comp_flat_b >= 0)
-        flat_reacting.insert(op.comp_flat_b);
-    }
+    // Each slot's reaction center, its seed (issue #88 — see slot_seed; an
+    // n-ary rule carries no local function, so no tag), and the reacting
+    // components on that seed, mirroring the two-slot path.  The reacting
+    // components drive embedding deduplication in count_embeddings_single
+    // for a single-molecule slot; a multi-molecule slot collapses whole
+    // matches on its center instead.
     for (int slot = 0; slot < n; ++slot) {
-      int const mi = ns.slot_start[slot];
-      auto& pm = rule.reactant_pattern.molecules[mi];
-      ns.slot_type_index[slot] = pm.type_index;
-      int flat_base = 0;
-      for (int j = 0; j < mi; ++j)
-        flat_base += static_cast<int>(rule.reactant_pattern.molecules[j].components.size());
-      for (int ci = 0; ci < static_cast<int>(pm.components.size()); ++ci)
-        if (flat_reacting.count(flat_base + ci))
-          ns.reacting_local[slot].push_back(ci);
+      ns.center[slot] = slot_center(rule, ns.slot_start[slot], ns.slot_end[slot]);
+      int const mi = slot_seed(ns.slot_start[slot], ns.slot_end[slot], ns.center[slot], -1);
+      ns.slot_seed[slot] = mi;
+      ns.slot_type_index[slot] = rule.reactant_pattern.molecules[mi].type_index;
+      for (const auto& [cmi, local] : ns.center[slot].comps)
+        if (cmi == mi)
+          ns.reacting_local[slot].push_back(local);
+      std::sort(ns.reacting_local[slot].begin(), ns.reacting_local[slot].end());
+      ns.seed_in_center[slot] = ns.center[slot].has_mol(mi) ? 1 : 0;
     }
 
     // Which slots are pure context (issue #42).  Read from the same
@@ -5345,13 +5734,13 @@ struct Engine::Impl {
   // complex takes the same multi-molecule counter the bimolecular path uses
   // for its own slots (issue #26).
   int nary_slot_count(const Rule& rule, const NaryState& ns, int slot, int mid) {
-    int const start = ns.slot_start[slot];
+    int const seed = ns.slot_seed[slot];
     if (ns.slot_multi[slot] == 0)
-      return count_embeddings_single(pool, mid, rule.reactant_pattern.molecules[start], model,
-                                     nullptr, &ns.reacting_local[slot]);
-    return count_multi_mol_fast(pool, mid, rule.reactant_pattern, model, start, ns.slot_end[slot],
-                                start, ns.slot_adj[slot], &cm_profile_, &cmm_fc_profile_,
-                                /*fm=*/nullptr, &ns.reacting_local[slot]);
+      return count_embeddings_single(pool, mid, rule.reactant_pattern.molecules[seed], model,
+                                     nullptr, ns.seed_dedup(slot));
+    return count_multi_mol_fast(pool, mid, rule.reactant_pattern, model, ns.slot_start[slot],
+                                ns.slot_end[slot], seed, ns.slot_adj[slot], &cm_profile_,
+                                &cmm_fc_profile_, /*fm=*/nullptr, &ns.center[slot]);
   }
 
   // --- Per-complex tallies for an n-ary rule's context slots (issue #42) ---
@@ -6119,10 +6508,7 @@ struct Engine::Impl {
     for (auto& ax : rs.mol_aux)
       percx_cx_of(ax, slot) = -1;
     auto& rule = model.rules[ri];
-    int const seed =
-        (slot != 0)
-            ? ((rule.reactant_pattern_starts.size() > 1) ? rule.reactant_pattern_starts[1] : -1)
-            : ((!rule.reactant_pattern_starts.empty()) ? rule.reactant_pattern_starts[0] : 0);
+    int const seed = (slot != 0) ? rs.seed_pat_b : rs.seed_pat_a;
     if (seed < 0 || seed >= static_cast<int>(rule.reactant_pattern.molecules.size()))
       return;
     // Seed membership with the cheap representative and let percx_resum_rates
@@ -6259,11 +6645,9 @@ struct Engine::Impl {
     rs.ab_both_total = 0;
     rs.ab_both_sq_total = 0;
 
-    // Seed molecule for reactant pattern A
-    int const seed_a =
-        (!rule.reactant_pattern_starts.empty()) ? rule.reactant_pattern_starts[0] : 0;
-    int const seed_b =
-        (rule.reactant_pattern_starts.size() > 1) ? rule.reactant_pattern_starts[1] : -1;
+    // Seed molecules for reactant patterns A and B (see slot_seed)
+    int const seed_a = rs.seed_pat_a;
+    int const seed_b = rs.seed_pat_b;
 
     if (seed_a >= static_cast<int>(rule.reactant_pattern.molecules.size())) {
       // No reactant pattern molecule to seed on, so this rule has no
@@ -6320,14 +6704,11 @@ struct Engine::Impl {
 
       int count_a;
       if (rs.use_multi_mol_count) {
-        int const end_a = (rule.reactant_pattern_starts.size() > 1)
-                              ? rule.reactant_pattern_starts[1]
-                              : static_cast<int>(rule.reactant_pattern.molecules.size());
-        count_a = count_multi_mol_fast(pool, mid, rule.reactant_pattern, model, seed_a, end_a,
-                                       seed_a, rs.pat_adj_a, &cm_profile_, &cmm_fc_profile_,
-                                       &rs.fm_a, &rs.reacting_local_a);
+        count_a = count_multi_mol_fast(pool, mid, rule.reactant_pattern, model, slot_begin(rule, 0),
+                                       slot_end(rule, 0), seed_a, rs.pat_adj_a, &cm_profile_,
+                                       &cmm_fc_profile_, &rs.fm_a, &rs.center_a);
       } else {
-        count_a = count_embeddings_single(pool, mid, pm_a, model, nullptr, &rs.reacting_local_a);
+        count_a = count_embeddings_single(pool, mid, pm_a, model, nullptr, rs.seed_dedup_a());
       }
       rs.mol_data[mid].count_a = count_a;
       rs.a_total += count_a;
@@ -6346,12 +6727,11 @@ struct Engine::Impl {
 
         int count_b;
         if (rs.use_multi_mol_count_b) {
-          int const end_b = static_cast<int>(rule.reactant_pattern.molecules.size());
-          count_b = count_multi_mol_fast(pool, mid, rule.reactant_pattern, model, seed_b, end_b,
-                                         seed_b, rs.pat_adj_b, &cm_profile_, &cmm_fc_profile_,
-                                         &rs.fm_b, &rs.reacting_local_b);
+          count_b = count_multi_mol_fast(
+              pool, mid, rule.reactant_pattern, model, slot_begin(rule, 1), slot_end(rule, 1),
+              seed_b, rs.pat_adj_b, &cm_profile_, &cmm_fc_profile_, &rs.fm_b, &rs.center_b);
         } else {
-          count_b = count_embeddings_single(pool, mid, pm_b, model, nullptr, &rs.reacting_local_b);
+          count_b = count_embeddings_single(pool, mid, pm_b, model, nullptr, rs.seed_dedup_b());
         }
         rs.mol_data[mid].count_b = count_b;
         rs.b_total += count_b;
@@ -6495,9 +6875,7 @@ struct Engine::Impl {
     } else if (rs.has_local_rates && rule.molecularity <= 1) {
       // Local-rate rule: propensity = sum of per-molecule (count_a * local_rate)
       rs.local_propensity_total = 0;
-      int const seed_a_loc =
-          (!rule.reactant_pattern_starts.empty()) ? rule.reactant_pattern_starts[0] : 0;
-      auto& pm_a_loc = rule.reactant_pattern.molecules[seed_a_loc];
+      auto& pm_a_loc = rule.reactant_pattern.molecules[seed_a];
       for (int const mid : pool.molecules_of_type(pm_a_loc.type_index)) {
         if (!pool.molecule(mid).active)
           continue;
@@ -8261,10 +8639,8 @@ struct Engine::Impl {
       if constexpr (kIncrUpdateProfile)
         incr_profile_.rule_local_rate_cache_clears++;
 
-      int const seed_a =
-          (!rule.reactant_pattern_starts.empty()) ? rule.reactant_pattern_starts[0] : 0;
-      int const seed_b =
-          (rule.reactant_pattern_starts.size() > 1) ? rule.reactant_pattern_starts[1] : -1;
+      int const seed_a = rs.seed_pat_a;
+      int const seed_b = rs.seed_pat_b;
 
       if (seed_a >= static_cast<int>(rule.reactant_pattern.molecules.size())) {
         // Synthesis rule: recompute propensity if rate is dynamic
@@ -8429,17 +8805,14 @@ struct Engine::Impl {
                   incr_profile_.per_rule_count_a_multi.resize(ri + 1, 0);
                 incr_profile_.per_rule_count_a_multi[ri]++;
               }
-              int const end_a_inc = (rule.reactant_pattern_starts.size() > 1)
-                                        ? rule.reactant_pattern_starts[1]
-                                        : static_cast<int>(rule.reactant_pattern.molecules.size());
-              nd.count_a = count_multi_mol_fast(pool, mid, rule.reactant_pattern, model, seed_a,
-                                                end_a_inc, seed_a, rs.pat_adj_a, &cm_profile_,
-                                                &cmm_fc_profile_, &rs.fm_a, &rs.reacting_local_a);
+              nd.count_a = count_multi_mol_fast(
+                  pool, mid, rule.reactant_pattern, model, slot_begin(rule, 0), slot_end(rule, 0),
+                  seed_a, rs.pat_adj_a, &cm_profile_, &cmm_fc_profile_, &rs.fm_a, &rs.center_a);
             } else {
               if constexpr (kIncrUpdateProfile)
                 incr_profile_.count_a_single_calls++;
               nd.count_a =
-                  count_embeddings_single(pool, mid, pm_a, model, nullptr, &rs.reacting_local_a);
+                  count_embeddings_single(pool, mid, pm_a, model, nullptr, rs.seed_dedup_a());
             }
           }
 
@@ -8459,15 +8832,14 @@ struct Engine::Impl {
               if (rs.use_multi_mol_count_b) {
                 if constexpr (kIncrUpdateProfile)
                   incr_profile_.count_b_multi_calls++;
-                int const end_b_inc = static_cast<int>(rule.reactant_pattern.molecules.size());
-                nd.count_b = count_multi_mol_fast(pool, mid, rule.reactant_pattern, model, seed_b,
-                                                  end_b_inc, seed_b, rs.pat_adj_b, &cm_profile_,
-                                                  &cmm_fc_profile_, &rs.fm_b, &rs.reacting_local_b);
+                nd.count_b = count_multi_mol_fast(
+                    pool, mid, rule.reactant_pattern, model, slot_begin(rule, 1), slot_end(rule, 1),
+                    seed_b, rs.pat_adj_b, &cm_profile_, &cmm_fc_profile_, &rs.fm_b, &rs.center_b);
               } else {
                 if constexpr (kIncrUpdateProfile)
                   incr_profile_.count_b_single_calls++;
                 nd.count_b =
-                    count_embeddings_single(pool, mid, pm_b, model, nullptr, &rs.reacting_local_b);
+                    count_embeddings_single(pool, mid, pm_b, model, nullptr, rs.seed_dedup_b());
               }
             }
           }
@@ -8698,8 +9070,7 @@ struct Engine::Impl {
     auto& rs = rule_states[rule_idx];
     ReactionMatch match;
 
-    int const seed_a =
-        (!rule.reactant_pattern_starts.empty()) ? rule.reactant_pattern_starts[0] : 0;
+    int const seed_a = rs.seed_pat_a;
 
     // -- profile scaffolding (gated, see kSelectReactantsProfile) --
     using sr_clock = std::chrono::steady_clock;
@@ -8792,7 +9163,7 @@ struct Engine::Impl {
       }
 
       // Pick one embedding per slot and lay the components out flat.  Slot i
-      // is seeded at pattern molecule ns.slot_start[i]; a slot that spans
+      // is seeded at pattern molecule ns.slot_seed[i]; a slot that spans
       // more than one pattern molecule (issue #26) has its remaining
       // molecules resolved by walking bonds out of that seed, exactly as the
       // bimolecular sampler resolves its own multi-molecule patterns.
@@ -8801,10 +9172,31 @@ struct Engine::Impl {
       match.comp_ids.assign(n_flat, -1);
 
       for (int slot = 0; slot < ns.n_slots; ++slot) {
-        int const pat_mi = ns.slot_start[slot];
+        int const pat_mi = ns.slot_seed[slot];
         auto& pm = rule.reactant_pattern.molecules[pat_mi];
+
+        // A multi-molecule slot with a reaction center: draw uniformly among
+        // the instances c_i(m) counted (issue #88).  Where seed embeddings,
+        // whole matches and instances correspond one to one this is the
+        // single draw over extending seed embeddings made below.
+        if (ns.slot_multi[slot] != 0 && !ns.center[slot].empty()) {
+          SlotInstances const si = collect_slot_instances(
+              pool, chosen[slot], rule.reactant_pattern, model, ns.slot_start[slot],
+              ns.slot_end[slot], pat_mi, ns.slot_adj[slot], ns.center[slot]);
+          if (si.size() == 0) {
+            match.mol_ids.clear();
+            sr_finish(SrProfile::kPathNary, /*outcome=*/1);
+            return match;
+          }
+          int pick = static_cast<int>(uniform() * si.size());
+          pick = std::min(pick, si.size() - 1);
+          apply_slot_embedding(pool, rule.reactant_pattern, ns.slot_start[slot], ns.slot_end[slot],
+                               si, si.first[pick], match);
+          continue;
+        }
+
         std::vector<std::vector<int>> embs;
-        count_embeddings_single(pool, chosen[slot], pm, model, &embs, &ns.reacting_local[slot]);
+        count_embeddings_single(pool, chosen[slot], pm, model, &embs, ns.seed_dedup(slot));
         if (embs.empty()) {
           match.mol_ids.clear();
           sr_finish(SrProfile::kPathNary, /*outcome=*/1);
@@ -8823,9 +9215,10 @@ struct Engine::Impl {
             m.comp_ids[flat_base + ci] = pool.molecule(chosen[slot]).comp_ids[embs[ei][ci]];
           if (ns.slot_multi[slot] == 0)
             return true;
-          return resolve_pattern_context(rule.reactant_pattern, ns.slot_adj[slot], pat_mi,
-                                         ns.slot_end[slot], pat_mi, chosen[slot], embs[ei], m) &&
-                 slot_match_valid(rule, pat_mi, ns.slot_end[slot], m);
+          return resolve_pattern_context(rule.reactant_pattern, ns.slot_adj[slot],
+                                         ns.slot_start[slot], ns.slot_end[slot], pat_mi,
+                                         chosen[slot], embs[ei], m) &&
+                 slot_match_valid(rule, ns.slot_start[slot], ns.slot_end[slot], m);
         };
 
         if (ns.slot_multi[slot] == 0) {
@@ -8910,7 +9303,7 @@ struct Engine::Impl {
       if (!multi_mol_pattern) {
         // Simple single-molecule unimolecular rule
         std::vector<std::vector<int>> embs;
-        count_embeddings_single(pool, mol_id, pm_a, model, &embs, &rs.reacting_local_a);
+        count_embeddings_single(pool, mol_id, pm_a, model, &embs, rs.seed_dedup_a());
         if constexpr (kSelectReactantsProfile) {
           sr_profile_.uni_single_embs_sum += embs.size();
           if (embs.empty())
@@ -8956,7 +9349,7 @@ struct Engine::Impl {
             auto rng_after_fast = rng;
 
             rng = rng_before;
-            auto gen = select_multi_mol_unimolecular(rule, rs.pat_adj_a, mol_id, seed_a);
+            auto gen = select_multi_mol_unimolecular(rule, rs, mol_id);
             auto rng_after_gen = rng;
 
             bool const rng_ok = (rng_after_fast == rng_after_gen);
@@ -8989,7 +9382,7 @@ struct Engine::Impl {
             full_match = select_2mol_1bond_fc_match(rule, rs, mol_id);
           }
         } else {
-          full_match = select_multi_mol_unimolecular(rule, rs.pat_adj_a, mol_id, seed_a);
+          full_match = select_multi_mol_unimolecular(rule, rs, mol_id);
         }
         if constexpr (kSelectReactantsProfile) {
           if (uni_path == SrProfile::kPathUniMultiFm) {
@@ -9013,7 +9406,7 @@ struct Engine::Impl {
 
     } else {
       // Bimolecular
-      int const seed_b = rule.reactant_pattern_starts[1];
+      int const seed_b = rs.seed_pat_b;
       auto& pm_a = rule.reactant_pattern.molecules[seed_a];
       auto& pm_b = rule.reactant_pattern.molecules[seed_b];
 
@@ -9100,68 +9493,87 @@ struct Engine::Impl {
         return match;
       }
 
+      int const n_pat_mols = static_cast<int>(rule.reactant_pattern.molecules.size());
+      int const n_flat = rule.reactant_pattern.flat_comp_count();
+      int const begin_a = slot_begin(rule, 0);
+      int const end_a = slot_end(rule, 0);
+      int const begin_b = slot_begin(rule, 1);
+      int const end_b = slot_end(rule, 1);
+      bool const multi_a = (end_a - begin_a) > 1;
+      bool const multi_b = (end_b - begin_b) > 1;
+      // A multi-molecule pattern with a reaction center is drawn over its
+      // reaction instances — exactly what count_multi_mol_fast counted into
+      // the weight this molecule was drawn by (issue #88).
+      bool const inst_a = multi_a && !rs.center_a.empty();
+      bool const inst_b = multi_b && !rs.center_b.empty();
+
       // Sample embeddings (deduped by reacting-component targets so that
       // the uniform pick below selects among physically distinct reactions).
       std::vector<std::vector<int>> embs_a, embs_b;
-      count_embeddings_single(pool, mol_a, pm_a, model, &embs_a, &rs.reacting_local_a);
-      count_embeddings_single(pool, mol_b, pm_b, model, &embs_b, &rs.reacting_local_b);
+      SlotInstances si_a, si_b;
+      if (inst_a)
+        si_a = collect_slot_instances(pool, mol_a, rule.reactant_pattern, model, begin_a, end_a,
+                                      seed_a, rs.pat_adj_a, rs.center_a);
+      else
+        count_embeddings_single(pool, mol_a, pm_a, model, &embs_a, rs.seed_dedup_a());
+      if (inst_b)
+        si_b = collect_slot_instances(pool, mol_b, rule.reactant_pattern, model, begin_b, end_b,
+                                      seed_b, rs.pat_adj_b, rs.center_b);
+      else
+        count_embeddings_single(pool, mol_b, pm_b, model, &embs_b, rs.seed_dedup_b());
+      std::size_t const n_embs_a = inst_a ? static_cast<std::size_t>(si_a.size()) : embs_a.size();
+      std::size_t const n_embs_b = inst_b ? static_cast<std::size_t>(si_b.size()) : embs_b.size();
       if constexpr (kSelectReactantsProfile) {
-        sr_profile_.bimol_embs_a_sum += embs_a.size();
-        sr_profile_.bimol_embs_b_sum += embs_b.size();
+        sr_profile_.bimol_embs_a_sum += n_embs_a;
+        sr_profile_.bimol_embs_b_sum += n_embs_b;
       }
-      if (embs_a.empty() || embs_b.empty()) {
+      if (n_embs_a == 0 || n_embs_b == 0) {
         if constexpr (kSelectReactantsProfile)
           sr_profile_.bimol_embs_empty++;
         sr_finish(SrProfile::kPathBimol, /*outcome=*/1);
         return match;
       }
 
-      int const n_pat_mols = static_cast<int>(rule.reactant_pattern.molecules.size());
-      int const n_flat = rule.reactant_pattern.flat_comp_count();
-      int const end_a = seed_b; // pattern A spans [seed_a, seed_b)
-      int const end_b = n_pat_mols;
-      bool const multi_a = (end_a - seed_a) > 1;
-      bool const multi_b = (end_b - seed_b) > 1;
-
       // Lay seed embedding `emb` down at `pat_seed`, then, for a
       // multi-molecule pattern, walk its bonds out of the seed to place the
-      // rest.  False means this seed embedding does not reach a whole match.
-      auto apply_slot = [&](int pat_seed, int pat_end, const PatternAdj& adj, int mol,
-                            const std::vector<int>& emb, ReactionMatch& m) {
+      // rest of [pat_begin, pat_end).  False means this seed embedding does
+      // not reach a whole match.
+      auto apply_slot = [&](int pat_begin, int pat_seed, int pat_end, const PatternAdj& adj,
+                            int mol, const std::vector<int>& emb, ReactionMatch& m) {
         m.mol_ids[pat_seed] = mol;
         int const flat_base = rule.reactant_pattern.flat_index(pat_seed, 0);
         int const nc =
             static_cast<int>(rule.reactant_pattern.molecules[pat_seed].components.size());
         for (int ci = 0; ci < nc && ci < static_cast<int>(emb.size()); ++ci)
           m.comp_ids[flat_base + ci] = pool.molecule(mol).comp_ids[emb[ci]];
-        if (pat_end - pat_seed <= 1)
+        if (pat_end - pat_begin <= 1)
           return true;
         if constexpr (kSelectReactantsProfile)
           sr_profile_.bimol_resolve_calls++;
-        return resolve_pattern_context(rule.reactant_pattern, adj, pat_seed, pat_end, pat_seed, mol,
-                                       emb, m) &&
-               slot_match_valid(rule, pat_seed, pat_end, m);
+        return resolve_pattern_context(rule.reactant_pattern, adj, pat_begin, pat_end, pat_seed,
+                                       mol, emb, m) &&
+               slot_match_valid(rule, pat_begin, pat_end, m);
       };
 
-      // A multi-molecule pattern is drawn over the seed embeddings that reach
-      // a whole match — exactly the ones count_multi_mol_fast counted into the
-      // weight this molecule was drawn by.  Drawing over all of them and
-      // calling a dead end a null event instead would run the rule slow by
-      // the fraction that dead-ends: an `A(d,d)` bonded to a D and an E has
-      // two embeddings of `A(d!1)`, only one of which reaches the D, so
-      // `A(d!1).D(d!1) + X()` fired at half its rate.  A single-molecule
-      // pattern needs no filtering (every seed embedding is already a whole
-      // match) and skips the work outright, which also leaves its draw
-      // stream exactly as it was.
-      auto extending_embs = [&](int pat_seed, int pat_end, const PatternAdj& adj, int mol,
-                                const std::vector<std::vector<int>>& embs) {
+      // A multi-molecule pure-context pattern is drawn over the seed
+      // embeddings that reach a whole match — exactly the ones
+      // count_multi_mol_fast counted into the weight this molecule was drawn
+      // by.  Drawing over all of them and calling a dead end a null event
+      // instead would run the rule slow by the fraction that dead-ends: an
+      // `A(d,d)` bonded to a D and an E has two embeddings of `A(d!1)`, only
+      // one of which reaches the D, so `A(d!1).D(d!1) + X()` fired at half
+      // its rate.  A single-molecule pattern needs no filtering (every seed
+      // embedding is already a whole match) and skips the work outright,
+      // which also leaves its draw stream exactly as it was.
+      auto extending_embs = [&](int pat_begin, int pat_seed, int pat_end, const PatternAdj& adj,
+                                int mol, const std::vector<std::vector<int>>& embs) {
         std::vector<int> keep;
         keep.reserve(embs.size());
         ReactionMatch trial;
         for (int i = 0; i < static_cast<int>(embs.size()); ++i) {
           trial.mol_ids.assign(n_pat_mols, -1);
           trial.comp_ids.assign(n_flat, -1);
-          if (apply_slot(pat_seed, pat_end, adj, mol, embs[i], trial))
+          if (apply_slot(pat_begin, pat_seed, pat_end, adj, mol, embs[i], trial))
             keep.push_back(i);
         }
         return keep;
@@ -9174,12 +9586,12 @@ struct Engine::Impl {
       //
       // Both filters run before either draw, so a rule that loses a whole
       // side to dead ends still spends no uniform() on the other — the same
-      // ordering the embs_a/embs_b emptiness check above keeps.
-      bool const filter_a = multi_a && embs_a.size() > 1;
-      bool const filter_b = multi_b && embs_b.size() > 1;
+      // ordering the emptiness check above keeps.
+      bool const filter_a = multi_a && !inst_a && embs_a.size() > 1;
+      bool const filter_b = multi_b && !inst_b && embs_b.size() > 1;
       std::vector<int> ext_a, ext_b;
       if (filter_a) {
-        ext_a = extending_embs(seed_a, end_a, rs.pat_adj_a, mol_a, embs_a);
+        ext_a = extending_embs(begin_a, seed_a, end_a, rs.pat_adj_a, mol_a, embs_a);
         if (ext_a.empty()) {
           if constexpr (kSelectReactantsProfile)
             sr_profile_.bimol_resolve_failures++;
@@ -9188,7 +9600,7 @@ struct Engine::Impl {
         }
       }
       if (filter_b) {
-        ext_b = extending_embs(seed_b, end_b, rs.pat_adj_b, mol_b, embs_b);
+        ext_b = extending_embs(begin_b, seed_b, end_b, rs.pat_adj_b, mol_b, embs_b);
         if (ext_b.empty()) {
           if constexpr (kSelectReactantsProfile)
             sr_profile_.bimol_resolve_failures++;
@@ -9201,8 +9613,8 @@ struct Engine::Impl {
         auto i = static_cast<std::size_t>(uniform() * static_cast<double>(n));
         return (i >= n) ? (n - 1) : i;
       };
-      std::size_t const pick_a = draw(filter_a ? ext_a.size() : embs_a.size());
-      std::size_t const pick_b = draw(filter_b ? ext_b.size() : embs_b.size());
+      std::size_t const pick_a = draw(filter_a ? ext_a.size() : n_embs_a);
+      std::size_t const pick_b = draw(filter_b ? ext_b.size() : n_embs_b);
       int const ei_a = filter_a ? ext_a[pick_a] : static_cast<int>(pick_a);
       int const ei_b = filter_b ? ext_b[pick_b] : static_cast<int>(pick_b);
 
@@ -9212,8 +9624,19 @@ struct Engine::Impl {
       // Both sides were checked above, so these cannot fail; the branch is
       // kept so a future divergence between filter and apply surfaces as a
       // null event rather than a half-built match.
-      if (!apply_slot(seed_a, end_a, rs.pat_adj_a, mol_a, embs_a[ei_a], match) ||
-          !apply_slot(seed_b, end_b, rs.pat_adj_b, mol_b, embs_b[ei_b], match)) {
+      bool placed_a = true;
+      bool placed_b = true;
+      if (inst_a)
+        apply_slot_embedding(pool, rule.reactant_pattern, begin_a, end_a, si_a, si_a.first[ei_a],
+                             match);
+      else
+        placed_a = apply_slot(begin_a, seed_a, end_a, rs.pat_adj_a, mol_a, embs_a[ei_a], match);
+      if (placed_a && inst_b)
+        apply_slot_embedding(pool, rule.reactant_pattern, begin_b, end_b, si_b, si_b.first[ei_b],
+                             match);
+      else if (placed_a)
+        placed_b = apply_slot(begin_b, seed_b, end_b, rs.pat_adj_b, mol_b, embs_b[ei_b], match);
+      if (!placed_a || !placed_b) {
         match.mol_ids.clear(); // null event — context mismatch
         if constexpr (kSelectReactantsProfile)
           sr_profile_.bimol_resolve_failures++;
@@ -9819,20 +10242,71 @@ struct Engine::Impl {
   }
 
   // Resolve a full multi-molecule match for a unimolecular rule.
-  // Given the seed molecule (seed_mol_id at pattern position seed_a),
-  // follow bonds in the pattern to discover the other molecules.
-  // Reuses the same BFS logic as count_multi_molecule_embeddings.
-  ReactionMatch select_multi_mol_unimolecular(const Rule& rule, const PatternAdj& pa,
-                                              int seed_mol_id, int seed_a) {
+  // Given the seed molecule (seed_mol_id at pattern position rs.seed_pat_a),
+  // draw one of the reaction instances count_multi_mol_fast counted for it.
+  // A pure-context pattern has no instances to tell apart and keeps the BFS
+  // below, the same logic as count_multi_molecule_embeddings.
+  ReactionMatch select_multi_mol_unimolecular(const Rule& rule, const RuleState& rs,
+                                              int seed_mol_id) {
     auto& pat = rule.reactant_pattern;
     int n_pat_mols = static_cast<int>(pat.molecules.size());
     ReactionMatch match;
+    int const seed_a = rs.seed_pat_a;
+
+    if (!rs.center_a.empty()) {
+      int const begin = slot_begin(rule, 0);
+      int const end = slot_end(rule, 0);
+      SlotInstances const si = collect_slot_instances(pool, seed_mol_id, pat, model, begin, end,
+                                                      seed_a, rs.pat_adj_a, rs.center_a);
+      if (si.size() == 0)
+        return match;
+      int pick = -1; // a complete embedding
+      if (si.seed_draw_is_uniform()) {
+        // Draw the way this sampler always has: shuffle the seed embeddings
+        // and take the first that reaches a whole match.  That is uniform
+        // over the instances here (see seed_draw_is_uniform), and a rule
+        // issue #88 does not change keeps its exact draw stream — which the
+        // 2-mol-1-bond fast select mirrors draw for draw
+        // (kFastSelectInvariant).
+        int const n_se = si.n_seed_embs;
+        std::vector<int> order(n_se);
+        for (int i = 0; i < n_se; ++i)
+          order[i] = i;
+        for (int i = n_se - 1; i > 0; --i) {
+          int j = static_cast<int>(uniform() * (i + 1));
+          j = std::min(j, i);
+          std::swap(order[i], order[j]);
+        }
+        std::vector<int> whole_match_of(n_se, -1);
+        for (int e = 0; e < static_cast<int>(si.seed_emb.size()); ++e)
+          whole_match_of[si.seed_emb[e]] = e;
+        for (int const se : order) {
+          if (whole_match_of[se] >= 0) {
+            pick = whole_match_of[se];
+            break;
+          }
+        }
+      } else if (si.size() == 1) {
+        // One instance, reached several ways: nothing to draw.  (The old
+        // sampler drew nothing here either when the seed offered a single
+        // embedding — a partner with symmetric free components, say.)
+        pick = si.first[0];
+      } else {
+        // Otherwise only a draw over the instances themselves is uniform.
+        int i = static_cast<int>(uniform() * si.size());
+        i = std::min(i, si.size() - 1);
+        pick = si.first[i];
+      }
+      match.mol_ids.assign(n_pat_mols, -1);
+      match.comp_ids.assign(pat.flat_comp_count(), -1);
+      apply_slot_embedding(pool, pat, begin, end, si, pick, match);
+      return match;
+    }
 
     // Bond adjacency for the (entire-pattern) reactant A is pre-computed in
-    // pa (= rs.pat_adj_a, built at init via build_pattern_adjacency over the
-    // full unimolecular pattern range).  Reuse it instead of rebuilding per
-    // call.
-    auto& adj = pa.adj;
+    // rs.pat_adj_a, built at init via build_pattern_adjacency over the full
+    // unimolecular pattern range.  Reuse it instead of rebuilding per call.
+    auto& adj = rs.pat_adj_a.adj;
 
     // Get embeddings of seed pattern molecule into seed_mol_id
     std::vector<std::vector<int>> seed_embs;

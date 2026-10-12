@@ -186,6 +186,16 @@ struct RateLaw {
   bool is_local_b = false;
   bool local_arg_is_molecule_b = false;
 
+  // Reactant-pattern molecule a per-molecule factor is evaluated at — the
+  // molecule the BNGL tag sits on (`A(b!1).B(a!1)%x`) — for the A-side and
+  // B-side factor respectively.  -1 when that factor is complex-wide, the
+  // DOR1 unity constant, or absent.  `local_arg_is_molecule` cannot answer
+  // this: the DOR1 normalization below sets it on the unity side too.  The
+  // engine seeds the tagged slot here, because it evaluates a per-molecule
+  // factor at the seed (issue #88).
+  int local_tag_mol = -1;
+  int local_tag_mol_b = -1;
+
   // NFsim's DOR1: a *bimolecular* rule carrying a single local function, with
   // only one of the two reactants tagged (`S(s~0) + E()%x -> ...  lf(x)`).
   // Its propensity is `(Σ_t w_t·f(t)) · (Σ_u w_u)` over the tagged and

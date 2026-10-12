@@ -1,0 +1,70 @@
+# Feature: a rule's rate does not depend on the order its reactant pattern
+#   lists molecules in (issue #88)
+# Tests: one receptor-ligand chemistry written twice.  A bivalent ligand
+#   crosslinks bivalent receptors; a receptor is phosphorylated once for every
+#   ligand linking it to another receptor, and dephosphorylated while it holds
+#   two ligands.  Subsystem 1 writes both modification rules with the
+#   untransformed ligand first, subsystem 2 with the transformed receptor
+#   first.  The two patterns in each pair are the same graph, so BNG gives
+#   them the same reactions: each converting R is matched through either of
+#   two ligands, and those matches differ only in context.  RuleMonkey used
+#   to seed a pattern on its first molecule and count both, firing
+#   subsystem 1's rules 2x.  Binding turns over throughout, so the counts are
+#   maintained incrementally as the aggregates form and break.
+# Tier: base
+# Expected: R1p tracks R2p, Bound1 tracks Bound2, and both match NFsim.
+
+begin model
+begin parameters
+    L_tot   300
+    R_tot   300
+    kon     0.002   # /s per ligand-receptor site pair
+    koff    0.1     # /s
+    kp      0.5     # /s, per ligand linking the receptor to another one
+    kd      0.5     # /s, while the receptor holds two ligands
+    kd0     0.05    # /s, basal, any receptor
+end parameters
+
+begin molecule types
+    L1(r,r)
+    R1(l,l,s~0~1)
+    L2(r,r)
+    R2(l,l,s~0~1)
+end molecule types
+
+begin seed species
+    L1(r,r)       L_tot
+    R1(l,l,s~0)   R_tot
+    L2(r,r)       L_tot
+    R2(l,l,s~0)   R_tot
+end seed species
+
+begin observables
+    Molecules  R1p     R1(s~1)
+    Molecules  R2p     R2(s~1)
+    Molecules  Bound1  L1(r!1).R1(l!1)
+    Molecules  Bound2  L2(r!1).R2(l!1)
+    Molecules  Full1   R1(l!+,l!+)
+    Molecules  Full2   R2(l!+,l!+)
+end observables
+
+begin reaction rules
+    L1(r) + R1(l) <-> L1(r!1).R1(l!1)  kon, koff
+    L2(r) + R2(l) <-> L2(r!1).R2(l!1)  kon, koff
+
+    # Phosphorylation, once per ligand linking R to another R
+    L1(r!1,r!2).R1(l!1,s~0).R1(l!2) -> L1(r!1,r!2).R1(l!1,s~1).R1(l!2)  kp
+    R2(l!1,s~0).L2(r!1,r!2).R2(l!2) -> R2(l!1,s~1).L2(r!1,r!2).R2(l!2)  kp
+
+    # Dephosphorylation while R holds two ligands
+    L1(r!1).R1(l!1,l!2,s~1).L1(r!2) -> L1(r!1).R1(l!1,l!2,s~0).L1(r!2)  kd
+    R2(l!1,l!2,s~1).L2(r!1).L2(r!2) -> R2(l!1,l!2,s~0).L2(r!1).L2(r!2)  kd
+
+    R1(s~1) -> R1(s~0)  kd0
+    R2(s~1) -> R2(s~0)  kd0
+end reaction rules
+end model
+
+begin actions
+simulate({method=>"nf",t_end=>100,n_steps=>100,param=>"-bscb"})
+end actions

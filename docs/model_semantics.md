@@ -29,11 +29,11 @@ The runtime severity model is two-level:
   `Bound` (`x!+` or `x!?`), `BoundTo` (`x!1` shared label),
   `Wildcard` (component omitted).
 - Multi-molecule reactant patterns (`A(b!1).B(a!1)`), including
-  multi-bond rings. The pattern is seeded on its first molecule and the
-  rest are reached through its bonds; the sampler draws among the seed
-  embeddings that reach a whole match, and rejects a draw in which two
-  patterns (or two molecules of one pattern) land on the same molecule —
-  see "Multi-molecule reactant patterns" below.
+  multi-bond rings. A pattern counts one reaction per distinct placement
+  of its reaction center, whichever molecule it lists first; the sampler
+  draws among those, and rejects a draw in which two patterns (or two
+  molecules of one pattern) land on the same molecule — see
+  "Multi-molecule reactant patterns" below.
 - Three or more reactant patterns (`A + A + A -> P`,
   `A(s,d!1).D(d!1) + A(s) + A(s) -> P`) under an elementary rate law —
   see "N-ary reactant rules" below.
@@ -93,6 +93,14 @@ The runtime severity model is two-level:
     local function (DOR), function product, MM" as the affected set.
     `ft_local_fcn_bimol_sym` is verdicted against BNG2's ODE for that
     reason.
+  - **A per-molecule tag on any molecule of a pattern.** The factor is
+    evaluated at the tagged molecule, so `R(l!1,s~0).L(r!1)%x` reads its
+    local observable on the L. Before issue #88 RM evaluated it at the
+    pattern's first molecule, the R here, where an observable of L reads
+    0 and the rule never fired. When the tag sits on untransformed
+    context, each tagged molecule prices its own instances: a center
+    reached through two tagged molecules counts once for each, which is
+    NFsim's reading too.
   - **A per-molecule tag on a reactant pattern the rule does not
     transform.** Such a pattern is *context*: every embedding of it yields
     the identical reaction, so BNG2's network expansion emits one instance
@@ -464,15 +472,58 @@ These are emitted as `Severity::Warn` and the run proceeds.
 ## Multi-molecule reactant patterns
 
 A reactant pattern may be a `.`-joined complex — `A(b!1).B(a!1)` — on a
-unimolecular, bimolecular, or n-ary rule. The pattern is *seeded* on its
-first molecule, the rest are reached by walking its bonds out of that seed,
-and the per-molecule count `c(m)` that weights the draw is the number of
-embeddings whose seed lands on `m` and which reach a whole match.
+unimolecular, bimolecular, or n-ary rule.
 
-Two things follow, and both are enforced in the sampler:
+**What is counted is reactions, one per reaction center.** The reaction
+center is what the rule changes: every component whose state or bond it
+changes, and every molecule it deletes. BNG2 treats two matches of a
+pattern into one species that put the center in the same place as a single
+reaction, however they differ elsewhere (`filter_identical_by_rxn_center`
+in BNG2's `RxnRule.pm`), and RM counts the same way. So in
+
+```bngl
+L(r!1,r!2).R(l!1,s~0).R(l!2) -> L(r!1,r!2).R(l!1,s~1).R(l!2)  k
+```
+
+an R linked to two other R through two different L fires at `k`, not
+`2k`: the two matches differ only in which L, which the rule does not
+touch. A center that spans two molecules is counted per placement of the
+whole center: `La(r!1,r!2,s~0).Ra(l!1,t~0).Ra(l!2) -> ...`, which also
+changes the first R, fires at `2k` on an L between two R, because either R
+can be the first. The symmetry factor BNG2 writes into the XML covers what
+is left, the automorphisms that move the center itself, and RM applies it
+on top.
+
+How RM gets there: each pattern is *seeded* on one of its molecules, its
+matches are enumerated by walking the pattern's bonds out of the seed
+(branching wherever a symmetric component can be filled more than one
+way), and the per-molecule count `c(m)` that weights the draw is the number
+of distinct center placements among the whole matches whose seed lands on
+`m`. Summed over seed molecules, that is the reaction count only if no
+placement can be reached from two seeds — which holds when the seed is
+itself in the center. So the seed is the pattern's first molecule *in the
+reaction center*, not its first molecule (NFsim, too, heads each reactant
+pattern at a molecule the rule transforms). The exceptions: a pattern carrying a per-molecule
+local-function tag is seeded on the tagged molecule, where the factor is
+evaluated (see the local-function notes above), and a pattern the rule
+does not transform at all is pure context, counted once per complex (issue
+#33).
+
+Until issue #88 RM seeded every pattern on its first molecule and collapsed
+matches only on that molecule's own changed components. A rule that listed
+untransformed context first counted each center once per context molecule
+that reached it (2x above); a center on two molecules was collapsed to one
+(1x where BNG2 has 2x); and the collapse could keep a seed embedding that
+dead-ended and drop the one that reached a whole match, which made such a
+rule inert. A `.`-joined context molecule with two copies in the complex
+(`F().E(s~0)`), and a deleted molecule with symmetric components
+(`A(b) -> 0 DeleteMolecules` on an `A(b,b)`), were each counted twice.
+
+Two things follow for the sampler, and both are enforced:
 
 - **The embedding is drawn among the ones that reach a whole match**, not
-  among all embeddings of the seed molecule alone. A seed can offer an
+  among all embeddings of the seed molecule alone, and uniformly over
+  center placements, however many whole matches reach each. A seed can offer an
   embedding that goes nowhere: an `A(d,d)` bonded to a D on one `d` and an E
   on the other has two embeddings of `A(d!1)`, and only the one that lands
   on the D extends to `A(d!1).D(d!1)`. Treating the dead end as a null event
@@ -499,9 +550,10 @@ at Tier 0 rather than run (issues #24, #26).
 
 Such a rule takes a dedicated path in the engine, separate from the two-slot
 machinery that serves uni- and bimolecular rules. Reactant pattern `i` is
-*seeded* on its first molecule, and `c_i(m)` counts the embeddings of the
-whole pattern that place that seed on molecule `m` — for a single-molecule
-pattern, just its embeddings on `m`. The propensity is mass action over
+*seeded* on its first molecule in the reaction center, and `c_i(m)` counts
+the reaction-center placements of the whole pattern that put that seed on
+molecule `m` — for a single-molecule pattern, just its embeddings on `m`
+(see "Multi-molecule reactant patterns" above). The propensity is mass action over
 tuples of *distinct* seed molecules,
 
 ```

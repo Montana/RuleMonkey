@@ -84,8 +84,8 @@ void check_rates(const std::string& xml) {
     double const tol = 4.0 * std::sqrt(expect / kReps);
     std::fprintf(stderr, "  %s  mean=%8.2f  expected=%8.2f  tol=%.2f\n", what.c_str(), mean, expect,
                  tol);
-    check(std::fabs(mean - expect) <= tol, what + " mean " + std::to_string(mean) +
-                                               ", expected " + std::to_string(expect));
+    check(std::fabs(mean - expect) <= tol,
+          what + " mean " + std::to_string(mean) + ", expected " + std::to_string(expect));
   };
   check_mean("B(2), rate k*(time+1)  ", sum_b, 600.0 * kTEnd);
   check_mean("C(2), rate k*(time()+1)", sum_c, 100.0 * (kTEnd + (kTEnd * kTEnd / 2.0)));
