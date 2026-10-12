@@ -10,8 +10,12 @@ name: perf-diff
 # regression signal.
 #
 # Wall budget: ~10-12 min (BNG download once, RM build twice, full
-# benchmark twice at --reps 5).  Runs only on pull_request to avoid
+# benchmark twice at --reps 10).  Runs only on pull_request to avoid
 # spending the budget on every push to a topic branch.
+#
+# --reps matches ci.yml's feature_coverage job: the harness exits nonzero
+# on any FAIL verdict, which fails this job too, and at 5 fixed seeds a
+# change of draw stream alone can push a small model past tz 5 (#88).
 
 on:
   pull_request:
@@ -55,7 +59,7 @@ jobs:
           git checkout "origin/${{ github.base_ref }}"
           cmake --preset release
           cmake --build --preset release
-          python3 harness/benchmark_feature_coverage.py --reps 5
+          python3 harness/benchmark_feature_coverage.py --reps 10
           cp build/release/feature_coverage_report.md /tmp/base_report.md \
             || cp build/feature_coverage_report.md /tmp/base_report.md
 
@@ -66,7 +70,7 @@ jobs:
           rm -rf build/release
           cmake --preset release
           cmake --build --preset release
-          python3 harness/benchmark_feature_coverage.py --reps 5
+          python3 harness/benchmark_feature_coverage.py --reps 10
           cp build/release/feature_coverage_report.md /tmp/head_report.md \
             || cp build/feature_coverage_report.md /tmp/head_report.md
 
