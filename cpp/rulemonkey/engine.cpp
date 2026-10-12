@@ -10729,6 +10729,153 @@ struct Engine::Impl {
     return pieces;
   }
 
+  // Whether every bond `match` would delete between molecules the rule maps
+  // into different product patterns (RuleOp::separates_products) leaves them
+  // in different complexes, once all of the rule's operations apply: every
+  // bond it breaks, every bond it makes, every molecule it deletes.  BNG2
+  // rejects a reaction that leaves such molecules connected
+  // (SpeciesGraph::splitConnectedComponents), whatever the rule's
+  // molecularity (issue #102).  Under -bscb a rule's reactant patterns sit
+  // in different complexes and a bond the rule makes joins molecules of one
+  // product pattern, so two molecules mapped apart can only stay connected
+  // through the complex the deleted bond was in, and checking each such
+  // bond is enough.
+  bool products_stay_apart(const Rule& rule, const ReactionMatch& match, int rule_idx) const {
+    auto const n_flat = static_cast<int>(match.comp_ids.size());
+    auto comp_at = [&](int flat) {
+      return (flat >= 0 && flat < n_flat) ? match.comp_ids[flat] : -1;
+    };
+
+    bool any = false;
+    bool makes = false;
+    for (const auto& op : rule.operations) {
+      any = any || (op.type == OpType::DeleteBond && op.separates_products);
+      makes = makes || op.type == OpType::AddBond;
+    }
+    if (!any)
+      return true;
+
+    // The post-reaction graph, built only when a search needs it: the bonds
+    // the rule breaks, the molecules it deletes, and the bonds it makes, as
+    // edges between nodes -- a pool molecule by its id, a molecule the rule
+    // adds as -(1 + its product-pattern index).  Most events skip the search
+    // (the P7 shortcut below) and pay for none of it.
+    std::vector<std::pair<int, int>> broken;
+    std::unordered_set<int> deleted;
+    std::vector<std::pair<int, int>> made;
+    bool built = false;
+    auto build = [&]() {
+      built = true;
+      for (const auto& op : rule.operations) {
+        if (op.type == OpType::DeleteBond) {
+          int const ca = comp_at(op.comp_flat_a);
+          int const cb = (ca >= 0) ? pool.component(ca).bond_partner : -1;
+          if (cb >= 0)
+            broken.emplace_back(std::min(ca, cb), std::max(ca, cb));
+        } else if (op.type == OpType::DeleteMolecule) {
+          int const pi = op.delete_pattern_mol_idx;
+          if (pi < 0 || pi >= static_cast<int>(match.mol_ids.size()) || match.mol_ids[pi] < 0)
+            continue;
+          int const mid = match.mol_ids[pi];
+          if (op.delete_connected)
+            for (int const m : pool.molecules_in_complex(pool.complex_of(mid)))
+              deleted.insert(m);
+          else
+            deleted.insert(mid);
+        } else if (op.type == OpType::AddBond) {
+          auto node = [&](int flat, int product_mol) {
+            int const c = comp_at(flat);
+            if (c >= 0)
+              return pool.mol_of_comp(c);
+            return product_mol >= 0 ? -(1 + product_mol) : std::numeric_limits<int>::min();
+          };
+          int const a = node(op.comp_flat_a, op.product_mol_a);
+          int const b = node(op.comp_flat_b, op.product_mol_b);
+          if (a != std::numeric_limits<int>::min() && b != std::numeric_limits<int>::min() &&
+              a != b)
+            made.emplace_back(a, b);
+        }
+      }
+    };
+    auto is_broken = [&](int c, int p) {
+      std::pair<int, int> const e{std::min(c, p), std::max(c, p)};
+      return std::find(broken.begin(), broken.end(), e) != broken.end();
+    };
+
+    for (const auto& op : rule.operations) {
+      if (op.type != OpType::DeleteBond || !op.separates_products)
+        continue;
+      int const comp_a = comp_at(op.comp_flat_a);
+      int const partner = (comp_a >= 0) ? pool.component(comp_a).bond_partner : -1;
+      if (partner < 0)
+        continue;
+      int const mol_a = pool.mol_of_comp(comp_a);
+      int const mol_b = pool.mol_of_comp(partner);
+      if (mol_a == mol_b)
+        continue;
+
+      // P7: when the complex has zero cycle bonds (a tree), removing a bond
+      // disconnects its two ends, and removing more bonds or molecules
+      // cannot join them again; only a bond the rule makes could.  Skip the
+      // search then.  With kProductMolInvariant the search still runs, and
+      // must agree.
+      int const cx = pool.complex_of(mol_a);
+      bool const tree = !makes && pool.cycle_bond_count(cx) == 0;
+      if (tree && !kProductMolInvariant)
+        continue;
+      if (!built)
+        build();
+      if (deleted.count(mol_a) != 0 || deleted.count(mol_b) != 0)
+        continue;
+
+      // BFS from mol_a over the post-reaction graph; reaching mol_b means
+      // the two stay connected.
+      std::unordered_set<int> visited{mol_a};
+      std::queue<int> q;
+      q.push(mol_a);
+      bool found_b = false;
+      auto visit = [&](int nb) {
+        if (nb == mol_b)
+          found_b = true;
+        else if (deleted.count(nb) == 0 && visited.insert(nb).second)
+          q.push(nb);
+      };
+      while (!q.empty() && !found_b) {
+        int const cur = q.front();
+        q.pop();
+        if (cur >= 0) {
+          for (int const cid : pool.molecule(cur).comp_ids) {
+            int const p = pool.component(cid).bond_partner;
+            if (p < 0 || is_broken(cid, p))
+              continue;
+            visit(pool.mol_of_comp(p));
+            if (found_b)
+              break;
+          }
+        }
+        for (const auto& [a, b] : made) {
+          if (found_b)
+            break;
+          if (a == cur)
+            visit(b);
+          else if (b == cur)
+            visit(a);
+        }
+      }
+      if (kProductMolInvariant && tree && found_b) {
+        std::fprintf(stderr,
+                     "[ProductMol mismatch] rule=%d cycle_bond_count=%d "
+                     "but BFS reached mol_b (mol_a=%d mol_b=%d comp_a=%d "
+                     "partner=%d cx=%d)\n",
+                     rule_idx, pool.cycle_bond_count(cx), mol_a, mol_b, comp_a, partner, cx);
+        std::abort();
+      }
+      if (found_b)
+        return false;
+    }
+    return true;
+  }
+
   struct FireResult {
     std::unordered_set<int> affected;
     bool bond_changed; // true if any AddBond or DeleteBond fired
@@ -11436,94 +11583,24 @@ struct Engine::Impl {
         continue;
       }
 
-      // Product molecularity check: for a unimolecular rule with multiple
-      // product patterns and a DeleteBond, verify that breaking the bond
-      // actually separates the molecules into different connected components.
-      // If they remain connected through another path (e.g., a ring bond),
-      // the `+` between products cannot be satisfied, so reject as null.
+      // Product molecularity check (issue #102): a bond the rule deletes
+      // between molecules its map sends into different product patterns must
+      // leave them in different complexes.  If they remain connected through
+      // another path (e.g., a ring bond), the `+` between products cannot be
+      // satisfied, so reject as null.  BNG2 makes this test whatever the
+      // number of reactant patterns; RM used to make it for one only, bond
+      // by bond, and on every deleted bond of a rule with several product
+      // patterns, mapped apart or not.
       //
       // This enforces the RHS-`+` half of strict BNGL semantics.  It is
       // gated on `block_same_complex_binding` so that both halves of the
       // `+` check (LHS binding and RHS unbinding) toggle together, matching
       // NFsim's `-bscb` (which implies `-cb` and enables both checks).
-      if (model.block_same_complex_binding) {
-        auto& rule = model.rules[selected];
-        if (rule.molecularity <= 1 && rule.n_product_patterns > 1) {
-          bool reject = false;
-          for (auto& op : rule.operations) {
-            if (op.type != OpType::DeleteBond)
-              continue;
-            if (op.comp_flat_a < 0 || op.comp_flat_a >= static_cast<int>(match.comp_ids.size()))
-              continue;
-            int const comp_a = match.comp_ids[op.comp_flat_a];
-            if (comp_a < 0)
-              continue;
-            int const partner = pool.component(comp_a).bond_partner;
-            if (partner < 0)
-              continue;
-            int const mol_a = pool.mol_of_comp(comp_a);
-            int const mol_b = pool.mol_of_comp(partner);
-            if (mol_a == mol_b) {
-              reject = true;
-              break;
-            }
-            // P7: when the reactant complex has zero cycle bonds (tree),
-            // removing any single bond necessarily disconnects its two
-            // endpoints — the BFS below is guaranteed to fall out with
-            // found_b == false.  Skip it.  With kProductMolInvariant we
-            // also run the BFS and assert agreement.
-            int const cx = pool.complex_of(mol_a);
-            bool const tree = (pool.cycle_bond_count(cx) == 0);
-            if (tree && !kProductMolInvariant)
-              continue;
-
-            // BFS from mol_a avoiding the comp_a-partner edge; if we reach
-            // mol_b, the molecules stay connected after breaking this bond.
-            std::unordered_set<int> visited;
-            std::queue<int> q;
-            visited.insert(mol_a);
-            q.push(mol_a);
-            bool found_b = false;
-            while (!q.empty() && !found_b) {
-              int const cur = q.front();
-              q.pop();
-              auto& mol = pool.molecule(cur);
-              for (int const cid : mol.comp_ids) {
-                if (cid == comp_a || cid == partner)
-                  continue; // skip broken bond
-                int const p = pool.component(cid).bond_partner;
-                if (p < 0)
-                  continue;
-                int const nb = pool.mol_of_comp(p);
-                if (nb == mol_b) {
-                  found_b = true;
-                  break;
-                }
-                if (!visited.count(nb)) {
-                  visited.insert(nb);
-                  q.push(nb);
-                }
-              }
-            }
-            if (kProductMolInvariant && tree && found_b) {
-              std::fprintf(stderr,
-                           "[ProductMol mismatch] rule=%d cycle_bond_count=%d "
-                           "but BFS reached mol_b (mol_a=%d mol_b=%d comp_a=%d "
-                           "partner=%d cx=%d)\n",
-                           selected, pool.cycle_bond_count(cx), mol_a, mol_b, comp_a, partner, cx);
-              std::abort();
-            }
-            if (found_b) {
-              reject = true;
-              break;
-            }
-          }
-          if (reject) {
-            timing_sample += std::chrono::duration<double>(t1 - t0).count();
-            ++null_event_count;
-            continue;
-          }
-        }
+      if (model.block_same_complex_binding &&
+          !products_stay_apart(model.rules[selected], match, selected)) {
+        timing_sample += std::chrono::duration<double>(t1 - t0).count();
+        ++null_event_count;
+        continue;
       }
 
       // ensureConnected check: for DeleteBond operations with

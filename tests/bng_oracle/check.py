@@ -40,6 +40,7 @@ MODELS = {
     "context_nary": {"t_end": 100, "n_steps": 2, "seeds": 48},
     "context_dor_price": {"t_end": 1000, "n_steps": 2, "seeds": 24},
     "species_delete": {"t_end": 500, "n_steps": 2, "seeds": 24},
+    "product_split": {"t_end": 500, "n_steps": 2, "seeds": 24},
 }
 
 Z_THRESHOLD = 6.0

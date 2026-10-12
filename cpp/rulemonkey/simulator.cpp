@@ -893,6 +893,34 @@ TfunMethod parse_tfun_method(const std::string& s) {
 }
 
 // Resolve TFUN counter source
+// The product pattern a reactant-pattern component lands in, through the
+// rule's map, or -1 when the map does not carry it there (its molecule is
+// deleted, or the XML has no Map).
+int product_pattern_of(const Rule& rule, int reactant_flat) {
+  if (reactant_flat < 0 || reactant_flat >= static_cast<int>(rule.reactant_to_product_map.size()))
+    return -1;
+  int const product_flat = rule.reactant_to_product_map[reactant_flat];
+  if (product_flat < 0)
+    return -1;
+  int product_mol = -1;
+  int base = 0;
+  for (int mi = 0; mi < static_cast<int>(rule.product_pattern.molecules.size()); ++mi) {
+    int const nc = static_cast<int>(rule.product_pattern.molecules[mi].components.size());
+    if (product_flat < base + nc) {
+      product_mol = mi;
+      break;
+    }
+    base += nc;
+  }
+  if (product_mol < 0)
+    return -1;
+  int pattern = -1;
+  for (int pi = 0; pi < static_cast<int>(rule.product_pattern_starts.size()); ++pi)
+    if (rule.product_pattern_starts[pi] <= product_mol)
+      pattern = pi;
+  return pattern;
+}
+
 TfunCounterSource resolve_tfun_counter(const std::string& ctr_name,
                                        const std::unordered_map<std::string, double>& params,
                                        const std::unordered_set<std::string>& obs_names,
@@ -2059,6 +2087,22 @@ Model load_model(const std::string& xml_path,
       model.rules.push_back(std::move(rule));
     }
   }
+
+  // ---- DeleteBonds the `+` between product patterns separates (#102) ----
+  // BNG2 rejects a reaction that leaves connected two molecules the rule maps
+  // into different product patterns (SpeciesGraph::splitConnectedComponents,
+  // "Connected molecules mapped to different patterns"), whatever the rule's
+  // molecularity.  Mark each bond whose ends the map sends apart, so the
+  // engine checks those and only those.  The energy-expanded rules above
+  // carry an identity map and their own product_pattern_starts, so they are
+  // marked the same way.
+  for (auto& rule : model.rules)
+    for (auto& op : rule.operations)
+      if (op.type == OpType::DeleteBond) {
+        int const pa = product_pattern_of(rule, op.comp_flat_a);
+        int const pb = product_pattern_of(rule, op.comp_flat_b);
+        op.separates_products = pa >= 0 && pb >= 0 && pa != pb;
+      }
 
   // ---- Mark rate-dependent observables ----
   // An observable is rate-dependent only if it is transitively reachable

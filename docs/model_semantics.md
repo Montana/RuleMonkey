@@ -354,6 +354,21 @@ The runtime severity model is two-level:
   `A(x).B(y) -> A(x!1).B(y!1)` rule. Disable via
   `set_block_same_complex_binding(false)` or the CLI `-no-bscb` flag for
   parity with NFsim runs that omitted `-bscb`.
+- The same flag enforces the `+` between product patterns. Take a bond the
+  rule deletes between two molecules its map sends into different product
+  patterns. Once all of the rule's operations apply (every bond it breaks
+  or makes, every molecule it deletes), those two molecules must be in
+  different complexes. Otherwise the event is a null event: `A(b!1).B(a!1)
+  -> A(b) + B(a)` does not fire on a pair also joined by a second bond.
+  This is BNG2's rule (`SpeciesGraph::splitConnectedComponents`), and it
+  holds whatever the number of reactant patterns. A deleted bond whose two
+  molecules stay in one product pattern (`A(b!1,c!2).B(a!1,c!2) ->
+  A(b,c!2).B(a,c!2)`) is not a `+` and is not tested this way. The `.`
+  that keeps them together is the `ensureConnected` check, which runs
+  whatever the flag. Before issue #102 the test ran only for rules with
+  one reactant pattern. It checked one deleted bond at a time, and it
+  treated every deleted bond of a rule with several product patterns as a
+  `+`.
 
 ### Parameter overrides
 

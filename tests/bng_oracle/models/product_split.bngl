@@ -1,0 +1,123 @@
+# A deleted bond and the `+` between product patterns (issue #102).
+#
+# BioNetGen applies all of a rule's operations, then splits the result into
+# connected components and assigns each to the product pattern its mapped
+# molecules belong to.  If one component holds molecules mapped to two
+# different product patterns, the reaction does not happen
+# (SpeciesGraph::splitConnectedComponents: "Connected molecules mapped to
+# different patterns").  So a bond the rule deletes between molecules it maps
+# into different product patterns must leave them in different complexes,
+# whatever the number of reactant patterns, and once every operation of the
+# rule has applied.
+#
+# RuleMonkey made this test only for rules with one reactant pattern, one
+# deleted bond at a time, and on every deleted bond of a rule with several
+# product patterns, whether the map sent its ends apart or not:
+#
+#   Split2_ring    `A(b!1).B(a!1) + C(s) -> A(b) + B(a) + C(s)` on an A.B
+#                  pair joined twice: the c bond keeps A and B together, so
+#                  it never fires.  RuleMonkey fired it (two reactant
+#                  patterns, never tested).
+#   Split2_single  the same rule on a pair joined once: fires at k2*C, and C
+#                  is conserved, so the pairs decay at k2*N.
+#   Both_ring      `A(b!1,c!2).B(a!1,c!2) -> A(b,c) + B(a,c)` deletes both
+#                  bonds of the ring: fires at k.  RuleMonkey never fired it
+#                  (each bond tested alone, the other still standing).
+#   Keep_ring      `C(s!3).A(b!1,d!3).B(a!1) -> C(s) + A(b,d).B(a)`: C goes,
+#                  and the A-B bond it also deletes keeps A and B in one
+#                  product pattern, held by the ring.  Fires at k.
+#                  RuleMonkey never fired it (that bond tested as a `+`).
+#   Keep_chain     the same rule where A and B are joined once: the `.`
+#                  between A and B cannot hold, so it never fires (control).
+#   Swap2_ring     `A(b!1).B(a!1) + C(s) -> A(b!2).C(s!2) + B(a)` deletes a
+#                  bond and makes one: on a ring pair B stays on A, so it
+#                  never fires.  RuleMonkey fired it.
+#   Swap2_single   the same rule on a pair joined once: fires at k2*C, and
+#                  every C it takes leaves the pool.
+#   Split1_ring    `L(r!1).R(l!1) -> L(r) + R(l)` on an L.R ring: never fires
+#                  (control: the one-reactant case RuleMonkey already tested).
+#   Split1_single  the same rule on a pair joined once: fires at k (control).
+#   Eng_ring       an energy (Arrhenius) unbinding rule
+#                  `Ea(b!1).Eb(a!1) -> Ea(b) + Eb(a)` on a ring: never fires
+#                  (control).  RuleMonkey expands it into a rule of its own
+#                  at load, so this pins that the expanded rule is marked
+#                  too.
+#   Eng_single     the same rule on a pair joined once: fires at
+#                  exp(-(Ea0 + phi*0)) = k.  RT is set to 1 so that
+#                  RuleMonkey's exp(-(Ea0 + (phi-1)*dG)/RT) reads BNG2's
+#                  units; with G0 = 0 the two agree for any phi.
+#
+# Molecule types are separate per case, so no rule sees another case's
+# molecules.  Every count follows a closed form: N*exp(-k*t),
+# N*exp(-k2*N*t), N, or for Swap2_single, which uses up one C per event,
+# N/(1 + k2*N*t).
+begin model
+begin parameters
+  N     1000
+  k     1.0e-3
+  k2    1.0e-6
+  phi   0.5
+  Ea0   6.907755278982137
+  G0    0
+  RT    1
+end parameters
+begin molecule types
+  Sa(b,c)
+  Sb(a,c)
+  Sc(s)
+  Da(b,c)
+  Db(a,c)
+  Ka(b,c,d)
+  Kb(a,c)
+  Kc(s)
+  Wa(b,c,s)
+  Wb(a,c)
+  Wc(s)
+  L(r,x)
+  R(l,x)
+  Ea(b,c)
+  Eb(a,c)
+end molecule types
+begin seed species
+  Sa(b!1,c!2).Sb(a!1,c!2)              N
+  Sa(b!1,c).Sb(a!1,c)                  N
+  Sc(s)                                N
+  Da(b!1,c!2).Db(a!1,c!2)              N
+  Kc(s!3).Ka(b!1,c!2,d!3).Kb(a!1,c!2)  N
+  Kc(s!3).Ka(b!1,c,d!3).Kb(a!1,c)      N
+  Wa(b!1,c!2,s).Wb(a!1,c!2)            N
+  Wa(b!1,c,s).Wb(a!1,c)                N
+  Wc(s)                                N
+  L(r!1,x!2).R(l!1,x!2)                N
+  L(r!1,x).R(l!1,x)                    N
+  Ea(b!1,c!2).Eb(a!1,c!2)              N
+  Ea(b!1,c).Eb(a!1,c)                  N
+end seed species
+begin observables
+  Molecules  Split2_ring    Sa(b!1,c!2).Sb(a!1,c!2)
+  Molecules  Split2_single  Sa(b!1,c).Sb(a!1,c)
+  Molecules  Both_ring      Da(b!1,c!2).Db(a!1,c!2)
+  Molecules  Keep_ring      Kc(s!3).Ka(b!1,c!2,d!3).Kb(a!1,c!2)
+  Molecules  Keep_chain     Kc(s!3).Ka(b!1,c,d!3).Kb(a!1,c)
+  Molecules  Swap2_ring     Wa(b!1,c!2,s).Wb(a!1,c!2)
+  Molecules  Swap2_single   Wa(b!1,c,s).Wb(a!1,c)
+  Molecules  Split1_ring    L(r!1,x!2).R(l!1,x!2)
+  Molecules  Split1_single  L(r!1,x).R(l!1,x)
+  Molecules  Eng_ring       Ea(b!1,c!2).Eb(a!1,c!2)
+  Molecules  Eng_single     Ea(b!1,c).Eb(a!1,c)
+end observables
+begin energy patterns
+  Ea(b!1).Eb(a!1)   G0
+end energy patterns
+begin reaction rules
+  Split2: Sa(b!1).Sb(a!1) + Sc(s) -> Sa(b) + Sb(a) + Sc(s)   k2
+  Both:   Da(b!1,c!2).Db(a!1,c!2) -> Da(b,c) + Db(a,c)       k
+  Keep:   Kc(s!3).Ka(b!1,d!3).Kb(a!1) -> Kc(s) + Ka(b,d).Kb(a)   k
+  Swap2:  Wa(b!1,s).Wb(a!1) + Wc(s) -> Wa(b,s!2).Wc(s!2) + Wb(a)   k2
+  Split1: L(r!1).R(l!1) -> L(r) + R(l)                        k
+  Eng:    Ea(b!1).Eb(a!1) -> Ea(b) + Eb(a)   Arrhenius(phi, Ea0)
+end reaction rules
+end model
+begin actions
+  writeXML({overwrite=>1})
+end actions
