@@ -2890,7 +2890,8 @@ struct NaryPartition {
   std::vector<uint32_t> blocks; // block membership bitmasks
 };
 
-// Per-complex tally for one pure-context reactant slot (issue #33).
+// Per-complex tally for one pure-context reactant slot (issue #33), or for a
+// slot whose whole species the rule deletes, which BNG2 counts the same way.
 //
 // BioNetGen gives a reactant pattern the rule does not transform ONE reaction
 // instance per matching complex, however many molecules inside that complex
@@ -3186,9 +3187,10 @@ struct RuleState {
   double local_propensity_b_total = 0.0;
   double embedding_correction_a = 1.0; // overcounting correction for pattern A
   double embedding_correction_b = 1.0; // overcounting correction for pattern B
-  // Reactant pattern A / B is pure context — no operation in this rule touches
-  // it — so it is counted once per matching complex rather than once per
-  // matching molecule (issue #33).  See PerCxTally.
+  // Reactant pattern A / B is counted once per matching complex rather than
+  // once per matching molecule: it is pure context — no operation in this
+  // rule touches it (issue #33) — or the rule deletes its whole species,
+  // whose reaction center is then the species.  See PerCxTally.
   bool per_complex_a = false;
   bool per_complex_b = false;
   // …and that collapsed instance also has to be PRICED, at one of the
@@ -3237,6 +3239,10 @@ struct RuleState {
   std::vector<int> reacting_local_b;
   bool seed_in_center_a = false;
   bool seed_in_center_b = false;
+  // The rule deletes a molecule without the DeleteMolecules keyword, so it
+  // may fire only if what is left forms exactly its product patterns (see
+  // RuleOp::delete_requires_product_count and product_species_after).
+  bool counts_product_species = false;
   // The collapse a single-molecule slot's seed embeddings take: on the
   // reacting components when the seed is in the center (an empty list when
   // it is in it only as a deleted molecule), none when it is pure context.
@@ -3494,7 +3500,8 @@ double compute_propensity(const RuleState& rs, const Rule& rule, double rate, do
   // reactants"), so no automorphism can carry one pattern onto the other and
   // the reactant automorphism group is the direct product of the two
   // patterns' own.  A pure-context pattern contributes 1 — all of its
-  // automorphisms stabilize the (empty) reaction center — and is already
+  // automorphisms stabilize the (empty) reaction center, as they do the
+  // species that is the center of a whole-species delete — and is already
   // counted per complex by the issue-#33 tally, so applying the factor to it
   // would deflate a count that never was inflated.  So the factor lands on
   // the transformed slot, and after it the law reads complex counts on both
@@ -5019,8 +5026,17 @@ struct Engine::Impl {
   // both correct and simple.
   void resync_all_after_structural_change() {
     compute_observables();
-    for (int ri = 0; ri < static_cast<int>(model.rules.size()); ++ri)
-      rescan_all_molecules_for_rule(ri);
+    // A species added through the API can put a type into a complex for the
+    // first time, which can move a whole-species delete onto the
+    // per-complex count; rebuilding the rule states rescans them all too.
+    if (refresh_type_joins_complexes()) {
+      auto fired = rule_fire_counts; // a diagnostic tally, not rule state
+      init_rule_states();
+      rule_fire_counts = std::move(fired);
+    } else {
+      for (int ri = 0; ri < static_cast<int>(model.rules.size()); ++ri)
+        rescan_all_molecules_for_rule(ri);
+    }
     recompute_total_propensity();
     init_incremental_observables();
     // Every pure-context tally was just rebuilt from the live pool, so the
@@ -5042,7 +5058,75 @@ struct Engine::Impl {
   // halved the rate when both fired, so it has been removed.
   // embedding_correction_a / _b are kept at 1.0 throughout.
 
+  // Which molecule types can share a complex with another molecule: bonded
+  // in a seed species or in the pool as it stands, or at either end of a
+  // rule's AddBond.  A type outside the set is a monomer for the whole run
+  // (add_species is the one way round that, and it refreshes this).
+  std::vector<char> type_joins_complexes_;
+
+  // Recompute type_joins_complexes_; true when it changed.
+  bool refresh_type_joins_complexes() {
+    std::vector<char> joins(model.molecule_types.size(), 0);
+    auto mark = [&](int t) {
+      if (t >= 0 && t < static_cast<int>(joins.size()))
+        joins[t] = 1;
+    };
+    for (const auto& sp : model.initial_species)
+      if (sp.molecules.size() > 1)
+        for (const auto& m : sp.molecules)
+          mark(m.type_index);
+    for (const auto& rule : model.rules) {
+      auto mol_of_flat = [&](int flat) {
+        int base = 0;
+        for (const auto& pm : rule.reactant_pattern.molecules) {
+          int const nc = static_cast<int>(pm.components.size());
+          if (flat < base + nc)
+            return pm.type_index;
+          base += nc;
+        }
+        return -1;
+      };
+      auto product_type = [&](int pmi) {
+        return (pmi >= 0 && pmi < static_cast<int>(rule.product_pattern.molecules.size()))
+                   ? rule.product_pattern.molecules[pmi].type_index
+                   : -1;
+      };
+      for (const auto& op : rule.operations) {
+        if (op.type != OpType::AddBond)
+          continue;
+        mark(op.comp_flat_a >= 0 ? mol_of_flat(op.comp_flat_a) : product_type(op.product_mol_a));
+        mark(op.comp_flat_b >= 0 ? mol_of_flat(op.comp_flat_b) : product_type(op.product_mol_b));
+      }
+    }
+    for (int m = 0; m < pool.molecule_count(); ++m)
+      if (pool.molecule(m).active && pool.molecules_in_complex(pool.complex_of(m)).size() > 1)
+        mark(pool.molecule(m).type_index);
+    bool const changed = joins != type_joins_complexes_;
+    type_joins_complexes_ = std::move(joins);
+    return changed;
+  }
+
+  // Is reactant slot `slot` counted once per matching complex?  Pure context
+  // is (issue #33).  So is a whole species the rule deletes, whose reaction
+  // center is the species — but only where a complex can hold two matches
+  // of it.  Where the slot's seed type is always a monomer, a complex holds
+  // at most one, the per-molecule count already is the per-complex one, and
+  // the tally would only add a wide row per molecule and upkeep per event to
+  // every `X() -> 0` degradation rule in a model.
+  bool counts_per_complex(const Rule& rule, const ReactantTransforms& rt, int slot,
+                          int seed) const {
+    if (rt.is_context(static_cast<size_t>(slot)))
+      return true;
+    if (!rt.deletes_species(static_cast<size_t>(slot)) || seed < 0 ||
+        seed >= static_cast<int>(rule.reactant_pattern.molecules.size()))
+      return false;
+    int const t = rule.reactant_pattern.molecules[seed].type_index;
+    return t >= 0 && t < static_cast<int>(type_joins_complexes_.size()) &&
+           type_joins_complexes_[t] != 0;
+  }
+
   void init_rule_states() {
+    refresh_type_joins_complexes();
     int const n_rules = static_cast<int>(model.rules.size());
     rule_states.resize(n_rules);
     bind_infos.resize(n_rules);
@@ -5162,19 +5246,29 @@ struct Engine::Impl {
       rs.reacting_local_b = seed_reacting(rs.center_b, rs.seed_pat_b);
       rs.seed_in_center_a = rs.center_a.has_mol(rs.seed_pat_a);
       rs.seed_in_center_b = rs.seed_pat_b >= 0 && rs.center_b.has_mol(rs.seed_pat_b);
+      rs.counts_product_species =
+          std::any_of(rule.operations.begin(), rule.operations.end(), [](const RuleOp& op) {
+            return op.type == OpType::DeleteMolecule && op.delete_requires_product_count;
+          });
 
       // Pure-context reactant patterns (issue #33).  A reactant pattern that
       // NO operation in this rule touches is context: every embedding of it
       // yields the identical reaction, so BNG's network expansion emits one
       // reaction instance per matching COMPLEX rather than one per matching
-      // molecule.  The derivation is shared with the loader, which reads the
-      // same fact to decide whether an MM rule's symmetry_factor can be
-      // attributed to a slot (issue #37) — see reactant_pattern_transforms in
-      // model.hpp, including why an unresolved endpoint disables it.
+      // molecule.  A pattern whose whole species the rule deletes is counted
+      // the same way: BNG2 makes the species its reaction center, so every
+      // match into one species is one reaction — `A() -> 0` fires at k on an
+      // A.A dimer, not 2k — where RM, like NFsim, used to count one per
+      // match of the pattern's first molecule, which also made
+      // `A().B() -> 0` and `B().A() -> 0` differ by 2x on an A.B.A.  The
+      // derivation is shared with the loader, which reads the same fact to
+      // decide whether an MM rule's symmetry_factor can be attributed to a
+      // slot (issue #37) — see reactant_pattern_transforms in model.hpp,
+      // including why an unresolved endpoint disables it.
       {
         ReactantTransforms const rt = reactant_pattern_transforms(rule);
-        rs.per_complex_a = rt.is_context(0);
-        rs.per_complex_b = rt.is_context(1);
+        rs.per_complex_a = counts_per_complex(rule, rt, 0, rs.seed_pat_a);
+        rs.per_complex_b = counts_per_complex(rule, rt, 1, rs.seed_pat_b);
         // These two flags are the TWO-SLOT path's, and only its: they gate
         // bookkeeping (mol_data, percx_a/percx_b) that a rule with three or
         // more reactant patterns never builds, because
@@ -5675,17 +5769,18 @@ struct Engine::Impl {
       ns.seed_in_center[slot] = ns.center[slot].has_mol(mi) ? 1 : 0;
     }
 
-    // Which slots are pure context (issue #42).  Read from the same
-    // derivation the two-slot path uses, which already answers for every
-    // reactant pattern rather than just the first two — engine.cpp simply
-    // refused to act on slots 2..n-1 until this state existed to hold the
-    // answer.  `is_context` is false for a rule whose operations could not
-    // all be resolved to a reactant pattern, so an unresolved endpoint keeps
-    // the conservative per-molecule count rather than halving a real rate.
+    // Which slots are counted per complex — pure context (issue #42), or a
+    // whole species the rule deletes.  Read from the same derivation the
+    // two-slot path uses, which already answers for every reactant pattern
+    // rather than just the first two — engine.cpp simply refused to act on
+    // slots 2..n-1 until this state existed to hold the answer.
+    // counts_per_complex is false for a rule whose operations could not all
+    // be resolved to a reactant pattern, so an unresolved endpoint keeps the
+    // conservative per-molecule count rather than halving a real rate.
     {
       ReactantTransforms const rt = reactant_pattern_transforms(rule);
       for (int slot = 0; slot < n; ++slot) {
-        if (!rt.is_context(static_cast<size_t>(slot)))
+        if (!counts_per_complex(rule, rt, slot, ns.slot_seed[slot]))
           continue;
         ns.slot_context[slot] = 1;
         ns.any_context = true;
@@ -10536,6 +10631,104 @@ struct Engine::Impl {
 
   // --- Graph rewriting ---
 
+  // How many species the reactant complexes of `match` fall into once the
+  // rule's operations apply, worked out without touching the pool: their
+  // molecules less the ones the rule deletes, joined by their bonds less the
+  // ones it breaks plus the ones it makes, and each molecule it adds.
+  int product_species_after(const Rule& rule, const ReactionMatch& match) const {
+    std::unordered_set<int> deleted;
+    for (const auto& op : rule.operations) {
+      if (op.type != OpType::DeleteMolecule)
+        continue;
+      int const pi = op.delete_pattern_mol_idx;
+      if (pi < 0 || pi >= static_cast<int>(match.mol_ids.size()) || match.mol_ids[pi] < 0)
+        continue;
+      int const mid = match.mol_ids[pi];
+      if (op.delete_connected) {
+        for (int const m : pool.molecules_in_complex(pool.complex_of(mid)))
+          deleted.insert(m);
+      } else {
+        deleted.insert(mid);
+      }
+    }
+
+    // Nodes: the surviving molecules of every complex the match touches, then
+    // one per added molecule.
+    std::unordered_map<int, int> node_of;
+    std::vector<int> mols;
+    std::unordered_set<int> seen_cx;
+    for (int const mid : match.mol_ids) {
+      if (mid < 0 || !seen_cx.insert(pool.complex_of(mid)).second)
+        continue;
+      for (int const m : pool.molecules_in_complex(pool.complex_of(mid))) {
+        if (!pool.molecule(m).active || deleted.count(m) != 0)
+          continue;
+        node_of[m] = static_cast<int>(mols.size());
+        mols.push_back(m);
+      }
+    }
+    int n_nodes = static_cast<int>(mols.size());
+    std::vector<int> added_node(rule.product_pattern.molecules.size(), -1);
+    for (const auto& op : rule.operations)
+      if (op.type == OpType::AddMolecule && op.add_product_mol_idx >= 0 &&
+          op.add_product_mol_idx < static_cast<int>(added_node.size()))
+        added_node[op.add_product_mol_idx] = n_nodes++;
+
+    std::vector<int> parent(n_nodes);
+    for (int i = 0; i < n_nodes; ++i)
+      parent[i] = i;
+    auto find = [&](int x) {
+      while (parent[x] != x)
+        x = parent[x] = parent[parent[x]];
+      return x;
+    };
+    auto unite = [&](int a, int b) {
+      if (a >= 0 && b >= 0)
+        parent[find(a)] = find(b);
+    };
+    auto node_of_comp = [&](int flat, int product_mol) {
+      if (flat >= 0 && flat < static_cast<int>(match.comp_ids.size()) &&
+          match.comp_ids[flat] >= 0) {
+        auto it = node_of.find(pool.mol_of_comp(match.comp_ids[flat]));
+        return it == node_of.end() ? -1 : it->second;
+      }
+      if (product_mol >= 0 && product_mol < static_cast<int>(added_node.size()))
+        return added_node[product_mol];
+      return -1;
+    };
+
+    std::set<std::pair<int, int>> broken;
+    for (const auto& op : rule.operations) {
+      if (op.type != OpType::DeleteBond || op.comp_flat_a < 0 ||
+          op.comp_flat_a >= static_cast<int>(match.comp_ids.size()))
+        continue;
+      int const ca = match.comp_ids[op.comp_flat_a];
+      int const cb = (ca >= 0) ? pool.component(ca).bond_partner : -1;
+      if (cb >= 0)
+        broken.insert({std::min(ca, cb), std::max(ca, cb)});
+    }
+    for (int i = 0; i < static_cast<int>(mols.size()); ++i) {
+      for (int const cid : pool.molecule(mols[i]).comp_ids) {
+        int const p = pool.component(cid).bond_partner;
+        if (p < 0 || broken.count({std::min(cid, p), std::max(cid, p)}) != 0)
+          continue;
+        auto it = node_of.find(pool.mol_of_comp(p));
+        if (it != node_of.end())
+          unite(i, it->second);
+      }
+    }
+    for (const auto& op : rule.operations)
+      if (op.type == OpType::AddBond)
+        unite(node_of_comp(op.comp_flat_a, op.product_mol_a),
+              node_of_comp(op.comp_flat_b, op.product_mol_b));
+
+    int pieces = 0;
+    for (int i = 0; i < n_nodes; ++i)
+      if (find(i) == i)
+        ++pieces;
+    return pieces;
+  }
+
   struct FireResult {
     std::unordered_set<int> affected;
     bool bond_changed; // true if any AddBond or DeleteBond fired
@@ -11472,6 +11665,23 @@ struct Engine::Impl {
             continue;
           }
         }
+      }
+
+      // A molecule deleted without the DeleteMolecules keyword: BNG2 lets the
+      // reaction happen only if what is left forms exactly as many species as
+      // the rule has product patterns (the product count check in
+      // RxnRule::apply_rule), so `C(x!1,y!2).D(x!1) -> D(x)` does not fire on
+      // a C that also holds an E — deleting it would leave the D and the E
+      // apart.  Not gated on -bscb: NFsim refuses such a rule outright, so
+      // there is no loose reading to stay compatible with.  The propensity
+      // counts these draws, so rejecting them as null events realizes BNG2's
+      // rate exactly.
+      if (rule_states[selected].counts_product_species &&
+          product_species_after(model.rules[selected], match) !=
+              model.rules[selected].n_product_patterns) {
+        timing_sample += std::chrono::duration<double>(t1 - t0).count();
+        ++null_event_count;
+        continue;
       }
 
       auto fire_result = fire_rule(selected, match);

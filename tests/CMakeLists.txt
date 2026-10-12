@@ -598,6 +598,21 @@ add_test(
         ${_rulemonkey_test_dir}/cpp/reaction_center_model.xml
 )
 
+# Whole-species delete on a complex the API adds: `A() -> 0` counts once
+# per matching complex (BNG2 makes the species the reaction center), and a
+# type that is a monomer at load starts on the cheaper per-molecule count,
+# so add_species has to move the rule onto the per-complex one when it puts
+# that type into a complex.  The full set of deletion shapes is pinned
+# against BNG2 in tests/bng_oracle/models/species_delete.bngl.
+add_executable(species_delete_api_test cpp/species_delete_api_test.cpp)
+target_link_libraries(species_delete_api_test PRIVATE rulemonkey)
+
+add_test(
+    NAME species_delete_api_test
+    COMMAND species_delete_api_test
+        ${_rulemonkey_test_dir}/cpp/species_delete_api_model.xml
+)
+
 # Global-function exposure regression (issue #7): pins down that
 # Result::function_names / function_data, RuleMonkeySimulator::function_names()
 # and get_function_values() expose BNGL global-function values, that the

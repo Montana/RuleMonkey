@@ -1,0 +1,126 @@
+# Deleting a whole species, and deleting part of one.
+#
+# WHOLE SPECIES.  A rule that drops every molecule of a reactant pattern
+# without the DeleteMolecules keyword (`A() -> 0`) deletes the species the
+# pattern matched.  BioNetGen makes that SPECIES the rule's reaction center
+# (RxnRule::find_reaction_center: "a Species delete rule will add Species as
+# Rxn Center"), and matches with the same reaction center are one reaction
+# (filter_identical_by_rxn_center).  So the rule fires ONCE per matching
+# species, at k, however many of its molecules match the pattern and however
+# the pattern names it.  NFsim attaches the delete to the pattern's first
+# molecule -- "arbitrarily", in its own source -- and counts one instance per
+# match of that molecule, and RuleMonkey did the same: 2k on an A.A dimer,
+# and 2k or 1k on one A.B.A trimer depending on whether the rule was written
+# A().B() or B().A().  NFsim's -cb and -bscb do not change it.
+#
+# Every whole-species pool below decays at k per species, so its count
+# follows N*exp(-k*t):
+#
+#   Dim_any      `Ad() -> 0` on Ad.Ad                       was 2k
+#   Dim_whole    `Aw(b!1).Aw(b!1) -> 0` on Aw.Aw            was 2k
+#   Tri_A        `At() -> 0` on At.Bt.At                    was 2k
+#   Tri_B        `Bb() -> 0` on Ab.Bb.Ab   (control)        1k
+#   Tri_AB       `Aab().Bab() -> 0` on Aab.Bab.Aab          was 2k
+#   Tri_BA       `Bba().Aba() -> 0` on Aba.Bba.Aba          1k
+#   Mixed        `Am() -> 0` on Am monomers and Am.Am dimers, counted in
+#                molecules: N*exp(-k*t) + 2N*exp(-k*t)      dimers were 2k
+#   Assembled    `Ar() -> 0` while Ar monomers dimerize during the run, so
+#                the per-complex count follows complexes as they form
+#
+# PART OF A SPECIES.  When the rule keeps some molecules of the pattern
+# (`C(x!1).D(x!1) -> D(x)`), BNG2 deletes only the dropped ones, keyword or
+# not, and without the keyword lets the reaction happen only if what is left
+# forms exactly as many species as the rule has product patterns
+# (RxnRule::apply_rule).  RuleMonkey read DeleteMolecules="0" as "delete the
+# whole species" and took the kept molecules with it.  NFsim refuses such a
+# rule outright, so this half has no NFsim reference at all.
+#
+#   Keep         `Ck(x!1).Dk(x!1) -> Dk(x)` on Ck.Dk: Ck decays at k, Dk stays N
+#   Strand       the same rule on a C that also holds an E: deleting it would
+#                leave two species for one product pattern, so it never fires
+#   Bridge       `Xb(c!1).Cb(x!1,y!2).Yb(c!2) -> Xb(c) + Yb(c)` on Xb.Cb.Yb:
+#                fires at k, Xb and Yb stay N
+#   Ring         the same rule where Xb and Yb are also bonded directly: one
+#                species is left for two product patterns, so it never fires
+begin model
+begin parameters
+  N     2000
+  k     1.0e-3
+  kon   2.0e-6
+end parameters
+begin molecule types
+  Ad(b)
+  Aw(b)
+  At(b)
+  Bt(a,a)
+  Ab(b)
+  Bb(a,a)
+  Aab(b)
+  Bab(a,a)
+  Aba(b)
+  Bba(a,a)
+  Am(b)
+  Ar(b)
+  Ck(x)
+  Dk(x)
+  Cs(x,y)
+  Ds(x)
+  Es(c)
+  Xb(c,y)
+  Cb(x,y)
+  Yb(c,x)
+  Xr(c,y)
+  Cr(x,y)
+  Yr(c,x)
+end molecule types
+begin seed species
+  Ad(b!1).Ad(b!1)                          N
+  Aw(b!1).Aw(b!1)                          N
+  At(b!1).Bt(a!1,a!2).At(b!2)              N
+  Ab(b!1).Bb(a!1,a!2).Ab(b!2)              N
+  Aab(b!1).Bab(a!1,a!2).Aab(b!2)           N
+  Aba(b!1).Bba(a!1,a!2).Aba(b!2)           N
+  Am(b)                                    N
+  Am(b!1).Am(b!1)                          N
+  Ar(b)                                    N
+  Ck(x!1).Dk(x!1)                          N
+  Cs(x!1,y!2).Ds(x!1).Es(c!2)              N
+  Xb(c!1,y).Cb(x!1,y!2).Yb(c!2,x)          N
+  Xr(c!1,y!3).Cr(x!1,y!2).Yr(c!2,x!3)      N
+end seed species
+begin observables
+  Molecules Dim_any    Ad()
+  Molecules Dim_whole  Aw()
+  Molecules Tri_A      Bt()
+  Molecules Tri_B      Bb()
+  Molecules Tri_AB     Bab()
+  Molecules Tri_BA     Bba()
+  Molecules Mixed      Am()
+  Molecules Assembled  Ar()
+  Molecules Keep_C     Ck()
+  Molecules Keep_D     Dk()
+  Molecules Strand_C   Cs()
+  Molecules Bridge_C   Cb()
+  Molecules Bridge_XY  Xb().Yb()
+  Molecules Bridge_X   Xb()
+  Molecules Ring_C     Cr()
+end observables
+begin reaction rules
+  DimAny:    Ad() -> 0  k
+  DimWhole:  Aw(b!1).Aw(b!1) -> 0  k
+  TriA:      At() -> 0  k
+  TriB:      Bb() -> 0  k
+  TriAB:     Aab().Bab() -> 0  k
+  TriBA:     Bba().Aba() -> 0  k
+  Mixed:     Am() -> 0  k
+  Dimerize:  Ar(b) + Ar(b) -> Ar(b!1).Ar(b!1)  kon
+  Assembled: Ar() -> 0  k
+  Keep:      Ck(x!1).Dk(x!1) -> Dk(x)  k
+  Strand:    Cs(x!1).Ds(x!1) -> Ds(x)  k
+  Bridge:    Xb(c!1).Cb(x!1,y!2).Yb(c!2) -> Xb(c) + Yb(c)  k
+  Ring:      Xr(c!1).Cr(x!1,y!2).Yr(c!2) -> Xr(c) + Yr(c)  k
+end reaction rules
+end model
+begin actions
+  writeXML({overwrite=>1})
+end actions

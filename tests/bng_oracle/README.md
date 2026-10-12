@@ -50,6 +50,7 @@ process, not an approximation to it.
 | `context_sampler` | ssa | The same slot is **drawn** the way it is **counted**. Counting per complex while sampling per molecule leaves the same-complex rejection mis-weighted, which is a systematic bias wherever complexes hold unequal numbers of context matches (GH #33). |
 | `context_nary` | ssa | The same per-complex count on a rule with **three or more** reactant patterns, which takes the n-ary distinct-tuple machinery rather than the two-slot propensity (GH #42). Pins it on a static homodimer (2x), a static homotrimer ring against a single-molecule pattern (3x), and a catalyst dimer that forms and breaks for the whole run — plus `Guard_trans`, an n-ary rule that *does* transform its multi-subunit slot and must keep its 2x. |
 | `context_dor_price` | ode | **Which** molecule of the collapsed complex prices the surviving instance, when the context pattern also carries a per-molecule local function tag: the species' canonically-first match, as BNG2 expands it, and not the lowest live molecule id (GH #52). Three columns of the same chemistry that BNG gives the identical rate — seeded, assembled in-run, and one whose canonically-first molecule carries the *larger* value — so any disagreement between them is the defect. |
+| `species_delete` | ode | **Deleting a species.** A whole-species delete (`A() -> 0`, no `DeleteMolecules`) fires once per matching species, because BNG2 makes the species its reaction center — on homodimers, trimers named through either subunit, the same trimer named `A().B()` and `B().A()`, and dimers that assemble during the run. NFsim counts one per match of the pattern's first molecule, which is 2x on most of these and order-dependent. A partial delete without the keyword (`C(x!1).D(x!1) -> D(x)`) drops only the named molecule and fires only if the remainder forms exactly the product patterns; NFsim refuses it at load. |
 
 ## Running
 
@@ -61,8 +62,8 @@ python3 tests/bng_oracle/check.py --driver build/release/rm_driver
 
 Scoring is a z on the difference of two means, combining RuleMonkey's ensemble
 SEM with the reference's own in quadrature, so a stochastic reference is not
-treated as exact. Both models fail by tens of sigma against the pre-fix engine,
-which is the property that makes them worth committing.
+treated as exact. Each model fails by tens of sigma against the engine before
+its fix, which is the property that makes them worth committing.
 
 ## Regenerating
 

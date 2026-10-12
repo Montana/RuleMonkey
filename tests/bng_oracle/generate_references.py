@@ -55,6 +55,7 @@ MODELS = {
     "context_sampler": {"kind": "ssa", "t_end": 500, "n_steps": 5, "reps": 2000},
     "context_nary": {"kind": "ssa", "t_end": 100, "n_steps": 2, "reps": 600},
     "context_dor_price": {"kind": "ode", "t_end": 1000, "n_steps": 2},
+    "species_delete": {"kind": "ode", "t_end": 500, "n_steps": 2},
 }
 
 
