@@ -135,7 +135,7 @@ model-configuration surface:
 | `set_param_test` | Parameter overrides reach the engine for Ele / MM / initial-conc / eBNGL-energy paths; derived-parameter cascades work in declaration and reverse-dependency order; BNG2 `expr=` derivations re-derive seed amounts; clearing an override un-bakes a prior run; unknown names throw; mid-session add_molecules conserves mass |
 | `param_expr_gate_test` | Corpus-wide: a no-op `set_param` switches the cascade onto `<Parameter expr=>`, and no model's parameters may drift off their loaded `<Parameter value=>` when it does (issue #23) |
 | `initial_amount_test` | Seed-species introspection and pin/release; pins outrank parameter derivations, reach the engine, cover literal `concentration=` and `Fixed="1"` clamp targets, and un-bake on clear |
-| `save_load_test` | save/load round-trip preserves trajectory; XML mismatch is refused via the schema fingerprint; pre-V2 state files are refused |
+| `save_load_test` | A save/load continuation matches the same session continued in process, sample for sample; XML mismatch is refused via the schema fingerprint; pre-V2 state files are refused |
 
 ```bash
 ctest --preset release       # whole suite, ~20s
