@@ -63,8 +63,12 @@ The runtime severity model is two-level:
   parameter map at run time (`set_param` overrides take effect, including
   through derived-parameter chains — see "Parameter overrides" below).
 - **`Function`** — arbitrary expression evaluated against a live
-  variable map. Supports parameters, observables, the special variables
-  `time` / `t`, and references to other functions. Local functions
+  variable map. Supports parameters, observables, the clock as `time()`
+  or a bare `t`, and references to other functions. A model symbol
+  named `time` or `t` is that symbol: BNG2 accepts an observable named
+  `time`, and a bare `time` then reads it while `time()` still reads the
+  clock; a parameter, observable or function named `t` takes `t` from
+  the clock (issue #87). Local functions
   (per-molecule or per-pattern arguments) are supported in both
   per-molecule and complex-wide scopes, on unimolecular and bimolecular
   rules alike.

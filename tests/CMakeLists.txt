@@ -503,6 +503,20 @@ add_test(
         ${_rulemonkey_test_dir}/cpp/local_time_rate_model.xml
 )
 
+# A model symbol named `time` or `t` is that symbol, not the clock (issue
+# #87).  BNG2 accepts an observable named `time`, and RM bound the bare word
+# to the clock instead, silently; a parameter named `t` lost to RM's `t`
+# alias the same way.  Pins each function column against its closed form at
+# every sample and the mean count each rate law produces, with the call form
+# `time()` still the clock beside the observable.
+add_executable(time_symbol_test cpp/time_symbol_test.cpp)
+target_link_libraries(time_symbol_test PRIVATE rulemonkey)
+
+add_test(
+    NAME time_symbol_test
+    COMMAND time_symbol_test ${_rulemonkey_test_dir}/cpp/time_symbol_model.xml
+)
+
 # A session advanced in calls short against its waiting times (issue #89):
 # the draw that overshoots a call's end was rolled back and spent again by
 # the next call, so such a session all but stopped firing.  One zero-order

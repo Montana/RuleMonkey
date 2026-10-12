@@ -5,11 +5,11 @@
     "name": "BNGsim",
     "repo_remote": "git@github.com:lanl/bngsim.git",
     "repo_subdir": ".",
-    "branch_or_ref": "HEAD",
-    "current_branch": "main",
-    "commit": "c8369f68bd92d0f5395af52033adbdb95ee99db9"
+    "branch_or_ref": "5eb6e916bfad3419354ba1e9bcb6c24f6375b376",
+    "current_branch": "fix/exprtk-literal-strtod",
+    "commit": "5eb6e916bfad3419354ba1e9bcb6c24f6375b376"
   },
-  "imported_at_utc": "2026-08-23T07:44:56+00:00",
+  "imported_at_utc": "2026-10-12T17:25:38+00:00",
   "files": {
     "exprtk_header": {
       "path": "third_party/exprtk/exprtk.hpp",
@@ -21,22 +21,22 @@
     "expression_header": {
       "path": "third_party/bngsim_expr/include/bngsim/expression.hpp",
       "source_path": "include/bngsim/expression.hpp",
-      "sha256": "df9a4bb6fe952f03a9a1bb1139324f4f0890e170a583eaaa6d10a8590f1ea49e",
-      "bytes": 9062,
+      "sha256": "985c6437650a8481ce9e04b7019197b93356246a8287c37f4e2c36e9376acf55",
+      "bytes": 9564,
       "description": "BNGsim ExprTkEvaluator public wrapper header"
     },
     "expr_compat_header": {
       "path": "third_party/bngsim_expr/include/bngsim/expr_compat.hpp",
       "source_path": "include/bngsim/expr_compat.hpp",
-      "sha256": "00c6944497d5405c03a11d92c6295452963d70f304378e5be9561af58762ed7b",
-      "bytes": 2778,
+      "sha256": "aad86f0763e16678d5b741d4b1d6e02afc01276bd5c56a9ec4f578c29239f670",
+      "bytes": 3351,
       "description": "BNGsim BNG<->ExprTk compatibility primitives (GH #49)"
     },
     "expression_source": {
       "path": "third_party/bngsim_expr/src/expression.cpp",
       "source_path": "src/expression.cpp",
-      "sha256": "d84029ff11aedc46c85ca9f6764f72b69a2122a67699e8274a7a5bb70f491ccb",
-      "bytes": 55584,
+      "sha256": "f12af10abcf36c47e08be1d70e9486792dfe196bc51037e7b4de3338d8a4e9c7",
+      "bytes": 61559,
       "description": "BNGsim ExprTkEvaluator implementation"
     }
   },

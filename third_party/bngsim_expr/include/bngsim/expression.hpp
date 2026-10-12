@@ -49,17 +49,24 @@ class ExpressionEvaluator {
     // has a parameter-dependent crossing time — both are beyond Phase-1
     // (fixed-time) event sensitivity and keep raising. Constants and built-in
     // functions (e.g. time()) are not variables and are not reported.
+    // An empty result means the expression reads no model variable. Constants
+    // (including built-in physical constants) and built-in functions are
+    // excluded even if the evaluator stores them in the symbol table. When the
+    // set cannot be determined, this throws std::runtime_error rather than
+    // return an empty one (issue #779).
     virtual std::vector<const double *> referenced_variable_addresses(int expr_id) const = 0;
 };
 
 // ─── ExprTk-based implementation ─────────────────────────────────────────────
 //
 // Registers BNG-compatible aliases:
-//   ln → log, rint → round, sign → sgn
+//   ln → log, sign → sgn, rint → floor(x + 0.5) (BNG's rint, which is not
+//   ExprTk's round below zero; see expr_compat::rint)
 // Registers built-in constants:
 //   _pi, _e, _kB, _NA, _R, _h, _F
 // Registers built-in functions:
-//   if(cond, true_val, false_val), mratio(a, b, z), time()
+//   if(cond, true_val, false_val), mratio(a, b, z), time(),
+//   round(x) as C's round in place of ExprTk's (issue #684)
 // Note: `t` is intentionally NOT registered (BNG2.pl uses time() only),
 // leaving `t` free as a model identifier.
 //

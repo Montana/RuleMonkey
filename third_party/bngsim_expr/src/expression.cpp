@@ -27,6 +27,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <initializer_list>
 #include <iostream>
 #include <memory>
@@ -308,6 +309,8 @@ static bool mratio_asymptotic(double a, double b, double z, double *out) {
     return true;
 }
 
+double expr_compat::rint(double x) { return std::floor(x + 0.5); }
+
 double expr_compat::mratio(double a, double b, double z) {
     if (!mratio_cf_is_trustworthy(a, b, z)) {
         double asymptotic = 0.0;
@@ -499,12 +502,24 @@ template <typename T> struct RintFunction : public exprtk::ifunction<T> {
     RintFunction() : exprtk::ifunction<T>(1) {}
     T operator()(const T &x) override {
         const double dx = static_cast<double>(x);
-        const double r = std::round(dx);
+        // BNG's floor(x + 0.5), not std::round (issue #771): the two differ at
+        // every negative half, where std::round goes away from zero.
+        const double r = expr_compat::rint(dx);
         if (warner) {
             warner->warn_if_nonfinite("rint", {dx}, r);
         }
         return static_cast<T>(r);
     }
+};
+
+// round(x): std::round, a half away from zero — the C `round` codegen emits.
+// ExprTk's own round is floor(x + 0.5), or ceil(x - 0.5) below zero, and that
+// addition can itself round: it gave round(0.49999999999999994) = 1 and
+// round(2^52 + 1) = 2^52 + 2 while codegen gave 0 and 2^52 + 1 (issue #684).
+// configure_parser() disables the builtin so this one is the `round` parsed.
+template <typename T> struct RoundFunction : public exprtk::ifunction<T> {
+    RoundFunction() : exprtk::ifunction<T>(1) {}
+    T operator()(const T &x) override { return static_cast<T>(std::round(static_cast<double>(x))); }
 };
 
 template <typename T> struct SignFunction : public exprtk::ifunction<T> {
@@ -689,10 +704,12 @@ bool expr_compat::is_exprtk_reserved(const std::string &name) {
     //      of these once the function is registered, but the names are
     //      not on ExprTk's reserved_symbols[] list, so we have to track
     //      them here ourselves. BNG2.pl's parser already rejects
-    //      `ln`/`rint`/`mratio`/`time` as parameter names upstream, so
-    //      models reaching bngsim via `generate_network` can only hit
-    //      the `sign` collision in practice — but we mangle all five
-    //      for symmetry and to handle hand-crafted .net inputs.
+    //      `ln`/`rint`/`mratio`/`time` as *parameter* names upstream, but
+    //      it accepts an *observable* named `time`, so models reaching
+    //      bngsim via `generate_network` can hit the `sign` and `time`
+    //      collisions in practice. We mangle all five for symmetry and to
+    //      handle hand-crafted .net inputs. A mangled `time` stays the
+    //      clock in call form (`time()`); see is_zero_arg_builtin (#776).
     //
     //   3. The registration keys bngsim's built-in constants occupy after the
     //      unconditional "_X" → "u_X" remap (`u_pi`, …, `u_h`, `u_F`). A user
@@ -782,6 +799,7 @@ struct ExprTkEvaluator::Impl {
     MratioFunction<double> mratio_func;
     LnFunction<double> ln_func;
     RintFunction<double> rint_func;
+    RoundFunction<double> round_func;
     SignFunction<double> sign_func;
     TgammaFunction<double> tgamma_func;
     TimeFunction<double> time_func;
@@ -810,6 +828,16 @@ struct ExprTkEvaluator::Impl {
     // ExprTk's grammar would reject as `obs * ()`.
     std::unordered_set<std::string> scalar_variable_names;
 
+    // ExprTk's dependency collector reports constants from the symbol table
+    // alongside variables. Keep their registration keys so dependency queries
+    // can return only model variables, as the public interface promises.
+    std::unordered_set<std::string> constant_symbol_names;
+
+    // Built-in functions that take no arguments. Their call form `name()` means
+    // the built-in even when the model declares a scalar of the same name,
+    // which is then reachable only bare (issue #776). `time` is the only one.
+    static bool is_zero_arg_builtin(const std::string &name) { return name == "time"; }
+
     // Look up the symbol-table key for `name` when rewriting an expression.
     // Mirrors compute_registration_name() but only mangles reserved words
     // that were actually registered on this evaluator, so built-in tokens
@@ -837,6 +865,14 @@ struct ExprTkEvaluator::Impl {
     // know is a scalar — leaving function names (built-ins like `sin`,
     // `time`, user-defined Func0/1/2/3) untouched, since those go
     // through add_function and are not in scalar_variable_names.
+    //
+    // A built-in can end up in scalar_variable_names after all: a model may
+    // declare a scalar under a built-in's name, which define_variable registers
+    // under the mangled key and records by its source name. BNG2.pl rejects a
+    // *parameter* named `time` but accepts an *observable* named `time`, and a
+    // hand-written .net can declare either. `time()` must still read the clock
+    // then, so a zero-argument built-in call is never stripped (issue #776):
+    // stripping it turned the clock into the model scalar, silently.
     std::string strip_empty_parens(const std::string &expr) const {
         if (scalar_variable_names.empty())
             return expr;
@@ -858,7 +894,7 @@ struct ExprTkEvaluator::Impl {
                 }
                 std::string ident = expr.substr(start, i - start);
                 if (i + 1 < expr.size() && expr[i] == '(' && expr[i + 1] == ')' &&
-                    scalar_variable_names.count(ident)) {
+                    scalar_variable_names.count(ident) && !is_zero_arg_builtin(ident)) {
                     result += ident;
                     i += 2;
                 } else {
@@ -906,6 +942,15 @@ struct ExprTkEvaluator::Impl {
                     while (j < expr.size() && std::isspace(static_cast<unsigned char>(expr[j]))) {
                         j++;
                     }
+                    if (j < expr.size() && expr[j] == '(' && is_zero_arg_builtin(token)) {
+                        // `time()` with a model scalar also named `time`: the
+                        // call form is the built-in clock, the bare name is the
+                        // scalar (r_time). Not ambiguous — BNG gives `time()`
+                        // no other meaning — so emit the built-in unmapped
+                        // rather than raise (issue #776).
+                        result += token;
+                        continue;
+                    }
                     if (j < expr.size() && expr[j] == '(') {
                         throw std::runtime_error(
                             "identifier '" + token +
@@ -935,6 +980,7 @@ struct ExprTkEvaluator::Impl {
             mangled_user_names[name] = mapped;
         }
         symbol_table.add_constant(mapped, value);
+        constant_symbol_names.insert(mapped);
         scalar_variable_names.insert(name);
     }
 
@@ -950,7 +996,8 @@ struct ExprTkEvaluator::Impl {
         add_remapped_constant("_F", 96485.33212331002);
 
         // Wire the non-finite-return diagnostic into every owned adapter.
-        // time_func is intentionally omitted (see TimeFunction comment).
+        // time_func is intentionally omitted (see TimeFunction comment), and
+        // round_func needs none: std::round of a finite value is finite.
         mratio_func.warner = &nonfinite_warner;
         ln_func.warner = &nonfinite_warner;
         rint_func.warner = &nonfinite_warner;
@@ -960,6 +1007,8 @@ struct ExprTkEvaluator::Impl {
         // Register backward-compatible aliases
         symbol_table.add_function("ln", ln_func);
         symbol_table.add_function("rint", rint_func);
+        // A reserved name: ExprTk's builtin is disabled in configure_parser().
+        symbol_table.add_reserved_function("round", round_func);
         symbol_table.add_function("sign", sign_func);
         symbol_table.add_function("tgamma", tgamma_func);
 
@@ -982,11 +1031,23 @@ struct ExprTkEvaluator::Impl {
     Parser &acquire_parser() {
         if (!parser) {
             parser = std::make_unique<Parser>();
-            // Increase max stack depth for deeply nested if() expressions.
-            // ExprTk default is 400 (~200 nested if()), muParser handled 2000.
-            parser->settings().set_max_stack_depth(4096);
+            configure_parser(*parser);
         }
         return *parser;
+    }
+
+    // Every parser this evaluator uses is configured here, so the one that
+    // compiles an expression and the one that later re-reads it to collect its
+    // variables (referenced_variable_addresses) accept exactly the same inputs.
+    // They did not: the collector was ExprTk's own collect_variables(), which
+    // builds a default parser, and an expression deeper than that parser's
+    // limit compiled here and came back as reading no variables (issue #779).
+    static void configure_parser(Parser &p) {
+        // Increase max stack depth for deeply nested if() expressions.
+        // ExprTk default is 400 (~200 nested if()), muParser handled 2000.
+        p.settings().set_max_stack_depth(4096);
+        // `round` resolves to RoundFunction in the symbol table (issue #684).
+        p.settings().disable_base_function(Parser::settings_t::e_bf_round);
     }
 
     void set_time_ptr(double *ptr) { time_func.time_ptr = ptr; }
@@ -1060,7 +1121,8 @@ void ExprTkEvaluator::define_function(const std::string &name, Func3 fn) {
 
 // ─── C-style logical operator replacement ────────────────────────────────────
 // BNG2.pl emits C-style && and || in if() conditions, but ExprTk uses
-// 'and' and 'or' keywords. Replace before compilation.
+// 'and' and 'or' keywords. Replaced in compile(), after the identifier remap
+// (issue #770: see the note there).
 static std::string replace_logical_operators(const std::string &expr) {
     std::string result;
     result.reserve(expr.size() + 16);
@@ -1083,14 +1145,11 @@ static std::string replace_logical_operators(const std::string &expr) {
 }
 
 int ExprTkEvaluator::compile(const std::string &expr) {
-    // Replace C-style logical operators before any other processing
-    std::string preprocessed = replace_logical_operators(expr);
-
     // Strip `obs()` → `obs` for any name registered as a scalar variable.
     // BNGL accepts Observable references as zero-arg calls; ExprTk does
     // not. Run before remap_expression so we match against BNG-source
     // names, not their post-mangling forms.
-    std::string stripped = impl_->strip_empty_parens(preprocessed);
+    std::string stripped = impl_->strip_empty_parens(expr);
 
     // Remap identifiers before ExprTk compilation:
     //   - Unconditional: "_X" → "u_X" (ExprTk rejects '_' prefix)
@@ -1098,8 +1157,21 @@ int ExprTkEvaluator::compile(const std::string &expr) {
     //                    (e.g., user's `const` → `r_const`)
     std::string remapped = impl_->remap_expression(stripped);
 
+    // Replace C-style logical operators LAST, after the identifier remap
+    // (issue #770). The replacement inserts the ExprTk
+    // keywords `and` / `or`, which are identifiers as far as the remap is
+    // concerned: run first, a model symbol named `or` or `and` (mangled to
+    // `r_or` / `r_and` at registration) captured the operator just inserted,
+    // so `(x>2) || on` compiled as the implicit product `(x>2) r_or on` and
+    // `(a)||(b)` tripped the "declared symbol used as a function call" guard.
+    // `&&` and `||` contain no identifier characters, so the remap passes them
+    // through untouched and the keywords inserted here are never rewritten.
+    // Every expression without such a symbol compiles to exactly the text it
+    // did before.
+    std::string preprocessed = replace_logical_operators(remapped);
+
     // Delegate to compile_preprocessed (which also caches the string)
-    return compile_preprocessed(remapped);
+    return compile_preprocessed(preprocessed);
 }
 
 int ExprTkEvaluator::compile_preprocessed(const std::string &preprocessed_expr) {
@@ -1139,19 +1211,42 @@ std::vector<const double *> ExprTkEvaluator::referenced_variable_addresses(int e
     // table to the address it was bound to via define_variable. Names not
     // registered as variables (constants, functions) resolve to null and are
     // skipped, so the result contains only model-variable addresses.
-    std::vector<std::string> names;
-    // Pass the symbol table so the collector resolves built-in/user functions
-    // (e.g. time()) instead of bailing out when it meets an unknown token — the
-    // symbol-table-less overload returns nothing for a trigger like
-    // `time() >= t_dose`, which would silently hide a parameter reference.
-    if (!exprtk::collect_variables(impl_->preprocessed_strings[expr_id], impl_->symbol_table,
-                                   names)) {
-        return out;
+    //
+    // The text is re-parsed against this evaluator's own symbol table (so
+    // built-in and user functions such as time() resolve instead of stopping
+    // the parse — a trigger like `time() >= t_dose` must still report t_dose)
+    // by a parser configured exactly as the one that compiled it. ExprTk's
+    // exprtk::collect_variables() cannot be used: it builds a default parser
+    // whose stack-depth limit is ~10x lower than ours, and on failure it
+    // returns false, which this function used to turn into "reads no
+    // variables". Every caller takes an empty result to mean the expression is
+    // independent of the model — a fixed-time trigger, a zero jump sensitivity,
+    // a constant delay — so an expression past ~197 nested if()s or ~65 nested
+    // parentheses silently lost its dt*/dp term or its jump (issue #779).
+    // A re-parse that fails now raises instead: an unknown dependency set must
+    // not read as an empty one.
+    Impl::Parser collector;
+    Impl::configure_parser(collector);
+    collector.dec().collect_variables() = true;
+    Impl::Expression scratch;
+    scratch.register_symbol_table(impl_->symbol_table);
+    const std::string &text = impl_->preprocessed_strings[expr_id];
+    if (!collector.compile(text, scratch)) {
+        throw std::runtime_error("ExprTk: could not re-parse expression '" + text +
+                                 "' to collect the model variables it reads (" + collector.error() +
+                                 "). Its dependencies are unknown, so it cannot be classified "
+                                 "for sensitivity analysis.");
     }
-    out.reserve(names.size());
-    for (const std::string &nm : names) {
-        auto *var = impl_->symbol_table.get_variable(nm);
-        if (var != nullptr) {
+    std::deque<Impl::Parser::dependent_entity_collector::symbol_t> symbols;
+    collector.dec().symbols(symbols);
+    std::unordered_set<const double *> seen;
+    out.reserve(symbols.size());
+    for (const auto &sym : symbols) {
+        if (impl_->constant_symbol_names.count(sym.first) != 0) {
+            continue;
+        }
+        auto *var = impl_->symbol_table.get_variable(sym.first);
+        if (var != nullptr && seen.insert(&var->ref()).second) {
             out.push_back(&var->ref());
         }
     }

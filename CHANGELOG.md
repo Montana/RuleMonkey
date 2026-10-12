@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An observable named `time` was never bound, so a bare `time` in a rate
+  law read the clock instead (issue #87).** BNG2 rejects a *parameter*
+  named `time` but accepts an observable of that name, and the bare word is
+  then the observable while the call form `time()` is still the clock. RM
+  entered the clock under `time`, let the observable overwrite that entry,
+  and then skipped the name when binding, so the expression evaluator fell
+  back to its built-in clock, silently. With `Molecules time A()` holding 5,
+  `0 -> B() k*(time+1)` gave B(2) near 400 (`k*(t+1)` integrated) instead of
+  1200. The observable is now bound like any other.
+
+  The vendored bngsim expression layer is refreshed to bngsim `5eb6e91`,
+  which carries lanl/bngsim#810: a model scalar named `time` is registered
+  under a mangled key and `time()` stays the clock. Without it, binding the
+  observable would have turned `time()` into the observable too. The
+  refresh also brings bngsim's `rint` as BNG's `floor(x + 0.5)` (#771),
+  `round` as C's `round` (#684), and `&&`/`||` rewritten after the symbol
+  remap (#770); no model in RM's corpus uses any of them, and an embedded
+  build already links the host bngsim's layer. Its dependency-collector
+  change (#779) is in a call RM does not make.
+
+  A parameter named `t` read the clock the same way. RM aliases a bare `t`
+  to the clock, and the alias overwrote the parameter's entry; an observable
+  or function named `t` already won. A model symbol named `t` now always
+  takes the name.
+
 - **A rate law that reads `time()` was held at its value from the last
   event, so one that is 0 at the start of a run never fired (issue #86).**
   The SSA drew each waiting time from the propensity at the last event and

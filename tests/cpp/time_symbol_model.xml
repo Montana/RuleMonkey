@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Created by BioNetGen 2.9.3  -->
+<sbml xmlns="http://www.sbml.org/sbml/level3" level="3" version="1">
+  <model id="time_symbol_model">
+    <ListOfParameters>
+      <Parameter id="k" type="Constant" value="100" expr="100"/>
+      <Parameter id="t" type="Constant" value="3" expr="3"/>
+    </ListOfParameters>
+    <ListOfMoleculeTypes>
+      <MoleculeType id="A"/>
+      <MoleculeType id="B"/>
+      <MoleculeType id="C"/>
+    </ListOfMoleculeTypes>
+    <ListOfCompartments>
+    </ListOfCompartments>
+    <ListOfSpecies>
+      <Species id="S1"  concentration="5" name="A()">
+        <ListOfMolecules>
+          <Molecule id="S1_M1" name="A"/>
+        </ListOfMolecules>
+      </Species>
+      <Species id="S2"  concentration="0" name="B()">
+        <ListOfMolecules>
+          <Molecule id="S2_M1" name="B"/>
+        </ListOfMolecules>
+      </Species>
+      <Species id="S3"  concentration="0" name="C()">
+        <ListOfMolecules>
+          <Molecule id="S3_M1" name="C"/>
+        </ListOfMolecules>
+      </Species>
+    </ListOfSpecies>
+    <ListOfReactionRules>
+      <ReactionRule id="RR1" name="_R1" symmetry_factor="1">
+        <ListOfReactantPatterns>
+        </ListOfReactantPatterns>
+        <ListOfProductPatterns>
+          <ProductPattern id="RR1_PP1">
+            <ListOfMolecules>
+              <Molecule id="RR1_PP1_M1" name="B"/>
+            </ListOfMolecules>
+          </ProductPattern>
+        </ListOfProductPatterns>
+        <RateLaw id="RR1_RateLaw" type="Function" name="f" totalrate="0">
+          <ListOfArguments>
+          </ListOfArguments>
+        </RateLaw>
+        <Map>
+        </Map>
+        <ListOfOperations>
+          <Add id="RR1_PP1_M1"/>
+        </ListOfOperations>
+      </ReactionRule>
+      <ReactionRule id="RR2" name="_R2" symmetry_factor="1">
+        <ListOfReactantPatterns>
+        </ListOfReactantPatterns>
+        <ListOfProductPatterns>
+          <ProductPattern id="RR2_PP1">
+            <ListOfMolecules>
+              <Molecule id="RR2_PP1_M1" name="C"/>
+            </ListOfMolecules>
+          </ProductPattern>
+        </ListOfProductPatterns>
+        <RateLaw id="RR2_RateLaw" type="Function" name="g" totalrate="0">
+          <ListOfArguments>
+          </ListOfArguments>
+        </RateLaw>
+        <Map>
+        </Map>
+        <ListOfOperations>
+          <Add id="RR2_PP1_M1"/>
+        </ListOfOperations>
+      </ReactionRule>
+    </ListOfReactionRules>
+    <ListOfObservables>
+      <Observable id="O1" name="time" type="Molecules">
+        <ListOfPatterns>
+          <Pattern id="O1_P1">
+            <ListOfMolecules>
+              <Molecule id="O1_P1_M1" name="A"/>
+            </ListOfMolecules>
+          </Pattern>
+        </ListOfPatterns>
+      </Observable>
+      <Observable id="O2" name="Bobs" type="Molecules">
+        <ListOfPatterns>
+          <Pattern id="O2_P1">
+            <ListOfMolecules>
+              <Molecule id="O2_P1_M1" name="B"/>
+            </ListOfMolecules>
+          </Pattern>
+        </ListOfPatterns>
+      </Observable>
+      <Observable id="O3" name="Cobs" type="Molecules">
+        <ListOfPatterns>
+          <Pattern id="O3_P1">
+            <ListOfMolecules>
+              <Molecule id="O3_P1_M1" name="C"/>
+            </ListOfMolecules>
+          </Pattern>
+        </ListOfPatterns>
+      </Observable>
+    </ListOfObservables>
+    <ListOfFunctions>
+      <Function id="f">
+        <ListOfReferences>
+          <Reference name="k" type="Constant"/>
+          <Reference name="time" type="Observable"/>
+        </ListOfReferences>
+        <Expression> k*(time+1) </Expression>
+      </Function>
+      <Function id="g">
+        <ListOfReferences>
+          <Reference name="k" type="Constant"/>
+        </ListOfReferences>
+        <Expression> k*(time()+1) </Expression>
+      </Function>
+      <Function id="h">
+        <ListOfReferences>
+          <Reference name="t" type="Constant"/>
+        </ListOfReferences>
+        <Expression> 10*t </Expression>
+      </Function>
+    </ListOfFunctions>
+  </model>
+</sbml>

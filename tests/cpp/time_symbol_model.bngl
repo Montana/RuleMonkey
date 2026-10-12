@@ -1,0 +1,42 @@
+# Fixture for time_symbol_test (issue #87).  BNG2 rejects a parameter named
+# `time` but accepts an observable named `time`; the call form `time()` is
+# still the clock.  BNG2 also leaves `t` free, and a parameter named `t` is
+# that parameter, not the clock.  A() never changes, so the observable `time`
+# holds 5 for the whole run:
+#
+#   f() = k*(time+1)    reads the observable: 600, so B(t) has mean 600 t
+#   g() = k*(time()+1)  reads the clock: 100 (t+1), so C(t) has mean 100 (t + t^2/2)
+#   h() = 10*t          reads the parameter: 30 at every sample
+begin model
+begin parameters
+  k 100
+  t 3
+end parameters
+begin molecule types
+  A()
+  B()
+  C()
+end molecule types
+begin seed species
+  A() 5
+  B() 0
+  C() 0
+end seed species
+begin observables
+  Molecules time A()
+  Molecules Bobs B()
+  Molecules Cobs C()
+end observables
+begin functions
+  f() = k*(time+1)
+  g() = k*(time()+1)
+  h() = 10*t
+end functions
+begin reaction rules
+  0 -> B() f()
+  0 -> C() g()
+end reaction rules
+end model
+begin actions
+  writeXML()
+end actions
