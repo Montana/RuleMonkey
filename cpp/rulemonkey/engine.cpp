@@ -3913,9 +3913,14 @@ struct Engine::Impl {
     for (auto& name : model.parameter_names_ordered)
       eval_layout_index[name] = next++;
 
+    // The clock has a slot of its own, reached by the bare alias `t`.  A
+    // model symbol of that name wins: emplace leaves a parameter's entry in
+    // place, and an observable or function below overwrites the alias.  The
+    // clock is not entered under `time` -- the call form `time()` reads it
+    // through the evaluator, and a bare `time` is a model symbol or nothing
+    // (issue #87).
     eval_time_slot = next++;
-    eval_layout_index["time"] = eval_time_slot;
-    eval_layout_index["t"] = eval_time_slot;
+    eval_layout_index.emplace("t", eval_time_slot);
 
     eval_obs_slot.assign(model.observables.size(), -1);
     for (int i = 0; i < static_cast<int>(model.observables.size()); ++i) {
@@ -3950,16 +3955,15 @@ struct Engine::Impl {
     // Bind every layout slot into the ExprTk evaluator by address.
     // `eval_vars_flat` is now sized for good and never reallocates, so
     // `&eval_vars_flat[slot]` is stable for the engine's lifetime.
-    // `time` is NOT bound as a variable — ExprTk registers `time()` as
-    // a zero-arg function, wired straight to the live `current_time`
-    // member.  Bare `t` IS bound (RM aliases it to the time slot,
-    // which rebuild_eval_vars keeps equal to current_time).
+    // The clock is the evaluator's zero-arg function `time()`, wired
+    // straight to the live `current_time` member, and bare `t` when no
+    // model symbol takes the name (rebuild_eval_vars keeps the time slot
+    // equal to current_time).  A model symbol named `time` -- BNG2 accepts
+    // an observable of that name -- is bound like any other: the evaluator
+    // registers it under a mangled key and keeps `time()` the clock.
     expr_eval_.set_time_ptr(&current_time);
-    for (auto& [name, slot] : eval_layout_index) {
-      if (name == "time")
-        continue;
+    for (auto& [name, slot] : eval_layout_index)
       expr_eval_.define_variable(name, &eval_vars_flat[slot]);
-    }
 
     // Compile every global-function / rate-law expression.  A pure-TFUN
     // function carries no wrapper expression → id -1, evaluated straight
@@ -4028,7 +4032,8 @@ struct Engine::Impl {
   // `M_on(z)` would be misparsed as the implicit product `M_on * (z)`.
   // Stripping the balanced argument list reproduces the slot-value
   // semantics exactly.  Builtin calls (`exp`, `if`, `time`, ...) are not
-  // eval-layout names, so they pass through untouched.
+  // eval-layout names, so they pass through untouched -- and `time()` stays
+  // the clock even beside a model symbol named `time` (issue #87).
   std::string strip_layout_call_args(const std::string& expr) const {
     std::string out;
     out.reserve(expr.size());
@@ -4046,7 +4051,8 @@ struct Engine::Impl {
           ++i;
         std::string const ident = expr.substr(start, i - start);
         out += ident;
-        if (i < n && expr[i] == '(' && eval_layout_index.count(ident)) {
+        bool const clock_call = ident == "time" && i + 1 < n && expr[i + 1] == ')';
+        if (i < n && expr[i] == '(' && !clock_call && eval_layout_index.count(ident)) {
           int depth = 0;
           for (; i < n; ++i) {
             if (expr[i] == '(') {
