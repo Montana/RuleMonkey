@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.11.0] — 2026-10-13
+
 ### Changed
 
 - **A run's seed state now sits at `t_start` (issue #98).** `run(ts)` with
@@ -3368,7 +3370,8 @@ The legacy implementation, RuleMonkey 2.0.25, was introduced in:
 > RG. *RuleMonkey: software for stochastic simulation of rule-based
 > models.* BMC Bioinformatics 11:404 (2010). PMID: 20673321.
 
-[Unreleased]: https://github.com/richardposner/RuleMonkey/compare/v3.10.1...HEAD
+[Unreleased]: https://github.com/richardposner/RuleMonkey/compare/v3.11.0...HEAD
+[3.11.0]: https://github.com/richardposner/RuleMonkey/releases/tag/v3.11.0
 [3.10.1]: https://github.com/richardposner/RuleMonkey/releases/tag/v3.10.1
 [3.10.0]: https://github.com/richardposner/RuleMonkey/releases/tag/v3.10.0
 [3.9.0]: https://github.com/richardposner/RuleMonkey/releases/tag/v3.9.0
