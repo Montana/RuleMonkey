@@ -172,6 +172,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   difference of consecutive results. The comment now says so, and the new
   test pins it.
 
+- **Carry-over scans running at the same time in separate processes
+  shared one temp file (issue #92).** `parameter_scan` with
+  `reset_conc => 0`, and every `bifurcate`, pass each point's final state
+  to the next point by saving and reloading the session. That went through
+  `rm_scan_<n>.rmstate` in the temp directory, and `n` came from a counter
+  that restarts at 0 in every process, so two processes running chains at
+  once wrote and read the same `rm_scan_0.rmstate`. Six concurrent
+  `rm_scan` chains on `A_plus_A`, 300 points each, three times over: 17 of
+  the 18 failed. Some read errors (`Cannot open state file`,
+  `Invalid state file header`, `missing END marker`, `vector`), and some
+  ran away; one was at 7.9 GB when killed. A load that does succeed can
+  continue from the other process's pool, clock and RNG without a word, so
+  even a clean exit proved nothing.
+
+  The state now stays in memory, and a chain no longer touches the temp
+  directory. The same 18 chains all finish and match an uncontended run
+  byte for byte. Output is otherwise unchanged. `rm_scan` sweeps with
+  `reset_conc` 0 and 1 and bifurcations on `A_plus_A`,
+  `ft_nested_functions` and `zero_order_birth_model`, 20 seeds each, are
+  byte-identical to before. So are the files `save_state` writes.
+
 ## [3.10.1] — 2026-08-25
 
 ### Fixed

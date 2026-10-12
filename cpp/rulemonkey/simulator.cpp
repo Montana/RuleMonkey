@@ -11,7 +11,6 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -3380,8 +3379,8 @@ struct RuleMonkeySimulator::Impl {
   // `reset_conc == true`: every point is an independent run() from the
   // model's seed species — the dose-response case.  `reset_conc == false`:
   // every point continues from the prior point's final molecular state,
-  // threaded through a temporary state file, so the sweep is one
-  // continuous-time trajectory sharing a single RNG stream.
+  // threaded through an in-memory copy of the state file, so the sweep is
+  // one continuous-time trajectory sharing a single RNG stream.
   //
   // The swept override is restored to its pre-call state on the way out
   // (including the exception path), leaving the simulator exactly as the
@@ -3401,14 +3400,14 @@ struct RuleMonkeySimulator::Impl {
       sync_parameters();
     };
 
-    // One state file per chain invocation; reused (overwritten) across the
-    // points of a carry-over chain, removed when the chain finishes.  A
-    // process-global counter keeps concurrent chains from colliding.
-    static std::atomic<unsigned long long> chain_counter{0};
-    const std::filesystem::path tmp =
-        std::filesystem::temp_directory_path() /
-        ("rm_scan_" + std::to_string(chain_counter.fetch_add(1)) + ".rmstate");
-    bool tmp_written = false;
+    // A carry-over point ends by saving the session, and the next point,
+    // whose Engine is built from the re-resolved parameters, loads it.  The
+    // state stays in memory (issue #92).  It used to go through
+    // rm_scan_<n>.rmstate in the temp directory, with n from a counter that
+    // restarted at 0 in every process, so two processes running chains at
+    // once wrote and read the same file: a failed load, a runaway one, or a
+    // silent continuation from the other process's pool, clock and RNG.
+    std::string carried_state;
     const double duration = per_point.t_end - per_point.t_start;
 
     ScanChainEndpoints out;
@@ -3436,13 +3435,15 @@ struct RuleMonkeySimulator::Impl {
             session->initialize();
           } else {
             session = std::make_unique<Engine>(model, 0, molecule_limit);
-            session->load_state(tmp.string());
+            std::istringstream is(carried_state);
+            session->load_state(is);
           }
           const double t0 = session->current_time();
           r = session->run(TimeSpec{t0, t0 + duration, per_point.n_points, {}});
           if (k + 1 < values.size()) {
-            session->save_state(tmp.string());
-            tmp_written = true;
+            std::ostringstream os;
+            session->save_state(os);
+            carried_state = os.str();
           }
           session.reset();
         }
@@ -3461,18 +3462,10 @@ struct RuleMonkeySimulator::Impl {
       }
     } catch (...) {
       session.reset();
-      if (tmp_written) {
-        std::error_code ec;
-        std::filesystem::remove(tmp, ec);
-      }
       restore_override();
       throw;
     }
 
-    if (tmp_written) {
-      std::error_code ec;
-      std::filesystem::remove(tmp, ec);
-    }
     restore_override();
     return out;
   }

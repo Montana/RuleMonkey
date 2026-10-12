@@ -21,16 +21,23 @@
 //     log bound, and an active session each throw;
 //   * no side effects — a sweep restores the swept parameter's override
 //     state (a prior set_param survives; absent it the declared value is
-//     left intact).
+//     left intact);
+//   * no temp file — a carry-over chain or a bifurcation runs, and gives the
+//     same endpoints, with the temp directory pointing at a regular file
+//     (issue #92).
 //
 // argv[1] = A_plus_A.xml          (kp, km, A_tot; observables A_1, AA_1)
 // argv[2] = ft_nested_functions.xml (k0; three global functions)
 
 #include "rulemonkey/simulator.hpp"
 
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -284,6 +291,93 @@ void test_reset_conc_carryover(const std::string& xml) {
   check(!sim.has_session(), "reset_conc=false sweep leaves no session behind");
 }
 
+// Points the temp-directory variables at `path` for its lifetime: TMPDIR,
+// which libc++ and libstdc++ read first, and TMP / TEMP, which Windows reads.
+// MSVC has no `setenv`, and the Windows CI leg builds and runs this suite.
+class TempDirOverride {
+public:
+  explicit TempDirOverride(const std::string& path) {
+    for (const char* name : {"TMPDIR", "TMP", "TEMP"}) {
+      // NOLINTNEXTLINE(concurrency-mt-unsafe) — single-threaded test.
+      const char* old = std::getenv(name);
+      saved_.push_back({name, old != nullptr, old != nullptr ? old : ""});
+      if (!set(name, path.c_str()))
+        throw std::runtime_error(std::string("could not set ") + name);
+    }
+  }
+  ~TempDirOverride() {
+    for (const auto& v : saved_)
+      (void)set(v.name, v.present ? v.value.c_str() : nullptr);
+  }
+  TempDirOverride(const TempDirOverride&) = delete;
+  TempDirOverride& operator=(const TempDirOverride&) = delete;
+  TempDirOverride(TempDirOverride&&) = delete;
+  TempDirOverride& operator=(TempDirOverride&&) = delete;
+
+private:
+  struct Saved {
+    const char* name;
+    bool present;
+    std::string value;
+  };
+
+  // A null value removes the variable.  False if it could not be set.
+  static bool set(const char* name, const char* value) {
+#ifdef _MSC_VER
+    return _putenv_s(name, value != nullptr ? value : "") == 0;
+#else
+    // NOLINTNEXTLINE(concurrency-mt-unsafe) — single-threaded test.
+    return (value != nullptr ? setenv(name, value, 1) : unsetenv(name)) == 0;
+#endif
+  }
+
+  std::vector<Saved> saved_;
+};
+
+// A carry-over chain hands each point's final state to the next point in
+// memory (issue #92).  It used to go through rm_scan_<n>.rmstate in the temp
+// directory, with n from a counter that restarted at 0 in every process, so
+// two processes running chains at once wrote and read the same file.  With
+// the temp directory pointing at a regular file, a chain that still used it
+// would throw; one that does not must give the endpoints it gives with the
+// temp directory intact.
+void test_carryover_needs_no_temp_dir(const std::string& xml) {
+  rulemonkey::ScanSpec spec = range_spec("kp", 0.001, 0.005, 4, 2.0);
+  spec.reset_conc = false;
+  rulemonkey::RuleMonkeySimulator sim(xml);
+  auto const ref_scan = sim.parameter_scan(spec, /*seed=*/5);
+  auto const ref_bif = sim.bifurcate(spec, /*seed=*/5);
+
+  auto const blocker =
+      std::filesystem::temp_directory_path() /
+      ("rm_parameter_scan_test." +
+       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".notadir");
+  std::ofstream(blocker) << "not a directory\n";
+
+  rulemonkey::ScanResult scan;
+  rulemonkey::BifurcateResult bif;
+  std::string error;
+  {
+    TempDirOverride const guard(blocker.string());
+    try {
+      scan = sim.parameter_scan(spec, /*seed=*/5);
+      bif = sim.bifurcate(spec, /*seed=*/5);
+    } catch (const std::exception& e) {
+      error = e.what();
+    }
+  }
+  std::filesystem::remove(blocker);
+
+  check(error.empty(), "carry-over chain needs the temp directory: " + error);
+  if (!error.empty())
+    return;
+  check(scan.observable_endpoints == ref_scan.observable_endpoints,
+        "reset_conc=false sweep differs when it cannot reach the temp directory");
+  check(bif.forward.observable_endpoints == ref_bif.forward.observable_endpoints &&
+            bif.backward.observable_endpoints == ref_bif.backward.observable_endpoints,
+        "bifurcate differs when it cannot reach the temp directory");
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -306,6 +400,7 @@ int main(int argc, char* argv[]) {
     test_validation(xml);
     test_no_side_effects(xml);
     test_reset_conc_carryover(xml);
+    test_carryover_needs_no_temp_dir(xml);
   } catch (const std::exception& e) {
     std::fprintf(stderr, "EXCEPTION: %s\n", e.what());
     return 2;

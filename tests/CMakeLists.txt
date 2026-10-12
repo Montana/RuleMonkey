@@ -685,8 +685,10 @@ add_test(
 # single-point / zero-width cases), endpoint shape, fixed-seed
 # determinism, the monotone AA response of A+A<->AA to the forward
 # rate, global-function columns, the ascending-axis alignment of
-# bifurcate's forward/backward branches, ScanSpec validation, and that
-# a sweep restores the swept parameter's override state.
+# bifurcate's forward/backward branches, ScanSpec validation, that
+# a sweep restores the swept parameter's override state, and that a
+# carry-over chain keeps its state in memory rather than in a temp file
+# another process can share (issue #92).
 add_executable(parameter_scan_test cpp/parameter_scan_test.cpp)
 target_link_libraries(parameter_scan_test PRIVATE rulemonkey)
 

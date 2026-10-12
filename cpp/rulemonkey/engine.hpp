@@ -4,6 +4,7 @@
 #include "rulemonkey/types.hpp"
 
 #include <cstdint>
+#include <iosfwd>
 #include <memory>
 #include <random>
 #include <string>
@@ -90,6 +91,10 @@ public:
   // Save full simulation state to file; load restores pool and derived state.
   void save_state(const std::string& path) const;
   void load_state(const std::string& path);
+  // The same state, as a stream: what parameter_scan's carry-over chain
+  // passes from one point to the next, without a file (issue #92).
+  void save_state(std::ostream& os) const;
+  void load_state(std::istream& is);
 
   // Enumerate the live species in the current pool: walk every complex,
   // canonicalize it, and group graph-isomorphic complexes into one row

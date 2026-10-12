@@ -4328,6 +4328,21 @@ struct Engine::Impl {
     std::ofstream os(path);
     if (!os)
       throw std::runtime_error("Cannot open state file for writing: " + path);
+    write_state(os);
+    if (!os)
+      throw std::runtime_error("Error writing state file: " + path);
+  }
+
+  void load_state_from(const std::string& path) {
+    std::ifstream is(path);
+    if (!is)
+      throw std::runtime_error("Cannot open state file for reading: " + path);
+    read_state(is);
+  }
+
+  // The state file's contents, written to and read from any stream: a file
+  // above, or memory for a parameter_scan carry-over chain.
+  void write_state(std::ostream& os) const {
     os << std::setprecision(17);
     // V2 (2026-04-30): added schema fingerprint between marker and time.
     os << "RM_STATE_V2\n";
@@ -4338,14 +4353,9 @@ struct Engine::Impl {
     pool.write_state(os);
     os << rng << "\n";
     os << "END\n";
-    if (!os)
-      throw std::runtime_error("Error writing state file: " + path);
   }
 
-  void load_state_from(const std::string& path) {
-    std::ifstream is(path);
-    if (!is)
-      throw std::runtime_error("Cannot open state file for reading: " + path);
+  void read_state(std::istream& is) {
     std::string marker;
     is >> marker;
     if (marker == "RM_STATE_V1") {
@@ -11475,6 +11485,14 @@ void Engine::add_molecules(const std::string& type_name, int count) {
 void Engine::save_state(const std::string& path) const { impl_->save_state_to(path); }
 
 void Engine::load_state(const std::string& path) { impl_->load_state_from(path); }
+
+void Engine::save_state(std::ostream& os) const {
+  impl_->write_state(os);
+  if (!os)
+    throw std::runtime_error("Error writing state");
+}
+
+void Engine::load_state(std::istream& is) { impl_->read_state(is); }
 
 std::vector<SpeciesRow> Engine::enumerate_species() const {
   // Canonicalize every complex; graph-isomorphic complexes share a
