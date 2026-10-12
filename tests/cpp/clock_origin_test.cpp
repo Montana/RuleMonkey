@@ -79,8 +79,8 @@ void check_mean(const std::string& what, const std::vector<double>& values, doub
   double const tol = 4.0 * std::sqrt(expect / static_cast<double>(values.size()));
   std::fprintf(stderr, "  %-34s mean=%8.3f  Lambda=%8.3f  tol=%.3f\n", what.c_str(), mean, expect,
                tol);
-  check(std::fabs(mean - expect) <= tol, what + ": mean " + std::to_string(mean) +
-                                             ", expected Lambda = " + std::to_string(expect));
+  check(std::fabs(mean - expect) <= tol,
+        what + ": mean " + std::to_string(mean) + ", expected Lambda = " + std::to_string(expect));
 }
 
 // Btot at each sample of a one-shot run over [5, 7], one row per seed.
@@ -100,6 +100,7 @@ void check_window(const std::string& name, const std::vector<std::vector<double>
   for (int k = 0; k <= kPoints; ++k) {
     double const t = kTStart + ((kTEnd - kTStart) * k / kPoints);
     std::vector<double> col;
+    col.reserve(runs.size());
     for (const auto& run : runs)
       col.push_back(run[k]);
     check_mean(name + " run B(" + std::to_string(t) + ")", col, lambda(t));
@@ -285,8 +286,8 @@ int main(int argc, char* argv[]) {
       if (run[0] != 0.0)
         ++nonzero_first;
     check(nonzero_first == 0, "the first row is not the seed state in " +
-                                  std::to_string(nonzero_first) + " of " +
-                                  std::to_string(kReps) + " seeds");
+                                  std::to_string(nonzero_first) + " of " + std::to_string(kReps) +
+                                  " seeds");
     check_flat_matches_shifted_run(xml, flat);
 
     check_window("ramp", run_window(xml, kRamp), lambda_ramp);
