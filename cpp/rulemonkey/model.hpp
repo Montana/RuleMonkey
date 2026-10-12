@@ -143,6 +143,13 @@ struct RuleOp {
   // enforces the `.` (same-complex) constraint on the product side.
   bool ensure_connected = false;
 
+  // For DeleteBond: true when the rule's map sends the bond's two molecules
+  // into different product patterns.  The `+` between them then requires
+  // the bond break to leave them in different complexes, once every
+  // operation of the rule applies (issue #102).  Set by load_model from
+  // reactant_to_product_map and product_pattern_starts.
+  bool separates_products = false;
+
   // For DeleteMolecule: which reactant-pattern molecule to delete
   int delete_pattern_mol_idx = -1;
   // True for a whole-species delete: BNG2 names the ReactantPattern, not a
@@ -304,13 +311,14 @@ struct Rule {
   // component type (e.g., A(a) + A(a) → A(a!1).A(a!1)).
   bool same_components = false;
 
-  // Number of separate ProductPatterns in the XML.  If > 1 for a
-  // unimolecular rule, a DeleteBond in the rule body must actually
-  // separate the molecules into different complexes (the `+` between
-  // product patterns requires distinct products).  When this is the
-  // case and `model.block_same_complex_binding` is set, the engine
-  // runs a BFS check at fire time and rejects events that leave the
-  // molecules still connected (e.g., breaking one bond in a ring).
+  // Number of separate ProductPatterns in the XML.  A DeleteBond whose two
+  // molecules the map sends into different product patterns
+  // (RuleOp::separates_products) must actually separate them: the `+`
+  // between product patterns requires distinct products.  When
+  // `model.block_same_complex_binding` is set, the engine checks this at
+  // fire time, whatever the rule's molecularity, and rejects an event that
+  // leaves the molecules still connected (e.g., breaking one bond in a
+  // ring).
   int n_product_patterns = 0;
   std::vector<int> product_pattern_starts; // analogous to reactant_pattern_starts
 

@@ -42,6 +42,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The `+` between product patterns was tested only for rules with one
+  reactant pattern, one deleted bond at a time, and on every deleted bond
+  (issue #102).** BNG2 applies all of a rule's operations, then rejects the
+  reaction if one complex holds molecules the rule maps into different
+  product patterns (`SpeciesGraph::splitConnectedComponents`), whatever
+  the rule's molecularity. RuleMonkey got three things wrong:
+
+  - It skipped the test for rules with two or more reactant patterns, so
+    `A(b!1).B(a!1) + C(s) -> A(b) + B(a) + C(s)` broke the A-B bond of a
+    pair also joined by a second bond.
+  - It searched for another path with only the one bond removed, so
+    `A(b!1,c!2).B(a!1,c!2) -> A(b,c) + B(a,c)`, which deletes both bonds
+    of a ring, never fired.
+  - It tested every deleted bond of a rule with several product patterns,
+    so `C(s!3).A(b!1,d!3).B(a!1) -> C(s) + A(b,d).B(a)` never fired on a
+    ring A.B. Its A-B bond keeps A and B in one product pattern.
+
+  The loader now marks each `DeleteBond` whose two molecules the rule's map
+  sends into different product patterns (`RuleOp::separates_products`).
+  The engine checks those bonds after every bond the rule breaks or makes
+  and every molecule it deletes. The cycle-free shortcut is kept, so a
+  tree complex needs no search. On `tests/bng_oracle/models/product_split.bngl`
+  (1000 of each, t = 500, mean of 24 seeds), BNG2's network against
+  RuleMonkey before and after:
+
+  | column | BNG2 | before | after |
+  |---|---|---|---|
+  | `Split2_ring` | 1000 | 608.5 | 1000 |
+  | `Both_ring` | 606.5 | 1000 | 607.7 |
+  | `Keep_ring` | 606.5 | 1000 | 607.9 |
+  | `Swap2_ring` | 1000 | 720.1 | 1000 |
+  | `Swap2_single` | 666.7 | 716.4 | 665.6 |
+
+  The other six columns are controls, and they agree before and after.
+  NFsim `-bscb` gets six of the eleven wrong, so the model is in the
+  BNG2-oracle suite. Every other model under `tests/` is byte-identical to
+  `main`, 237 XMLs at two seeds each. `rm_tlbr_rings`, the heaviest
+  ring-unbinding model, runs within 1% of `main`.
+
 - **`run()` accepted a window that ends before it starts.** `run({7, 5, n})`
   ran nothing and labelled one state with every sample time.
   `simulate()` and `parameter_scan` already refuse such a window, and
