@@ -190,7 +190,9 @@ The runtime severity model is two-level:
     counted as reading it. Local rates are included. Each panel node
     rescans such a rule in full, so a local rate over many instances
     pays several rescans per event. A global function that reads `time`
-    is reported at each sample's own time.
+    is reported at each sample's own time. The clock is the model's: a
+    run from `t_start = 5` reads `time() = 5` on its first row (see
+    "Where a run starts" below).
   - **Global function of a local function is ill-defined.** A global
     (no-argument) function that references a *local* function has no
     molecule context at global scope, so its exposed value (`.gdat`
@@ -719,6 +721,26 @@ if (any_errors) {
 
 auto result = sim.run({0.0, t_end, n_points}, seed);
 ```
+
+### Where a run starts: `t_start`
+
+`TimeSpec::t_start` is where the seed state sits on the model's clock. The
+first row records the seed state, the run spans `t_end - t_start`, and a
+rate law that reads `time()` reads absolute model time from `t_start` on.
+That is BNG's network `simulate` with a nonzero `t_start` (`run_network -i`).
+BNG2.pl's `simulate_nf` instead starts NFsim's clock at 0 and reports time
+elapsed since `t_start`. For a model whose rates do not read the clock the
+two give the same trajectory, shifted by `t_start`.
+
+A session takes the same origin from `initialize(seed, t_start)`, which
+leaves `current_time()` at `t_start`. `parameter_scan` starts each fresh
+point there. A carry-over chain (`reset_conc = false`, and `bifurcate`)
+starts its first point there and continues on the same clock, so its point
+`k` covers `[t_start + k*d, t_start + (k+1)*d]` for `d = t_end - t_start`.
+
+Before issue #98, a nonzero `t_start` started the clock at 0 and simulated
+`[0, t_start]` before the first row. A run asked for `[5, 7]` ran 7 time
+units, and its first row was not the seed state.
 
 ### Recording at explicit output times
 

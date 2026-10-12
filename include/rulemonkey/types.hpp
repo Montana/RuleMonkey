@@ -34,6 +34,10 @@ public:
 };
 
 struct TimeSpec {
+  // Where the seed state sits on the model's clock (issue #98).  run()
+  // records the seed state as its first row and spans `t_end - t_start`,
+  // and a rate law that reads time() reads that clock.  For a live session
+  // it is the segment's start, which must equal `current_time()`.
   double t_start = 0.0;
   double t_end = 0.0;
   int n_points = 0;

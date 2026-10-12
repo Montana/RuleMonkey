@@ -535,6 +535,21 @@ add_test(
         ${_rulemonkey_test_dir}/cpp/time_dependent_rate_model.xml
 )
 
+# The seed state sits at t_start (issue #98).  run() with t_start > 0 used to
+# simulate [0, t_start] first, and a session always started its clock at 0,
+# so a rate reading time() could not be run from the seed state on absolute
+# model time.  One zero-order rule, flat and 100*time(), over [5, 7]: checks
+# each mean against its closed form, that the first row is the seed state,
+# that initialize(seed, t_start) matches the one-shot run draw for draw, and
+# that parameter_scan's fresh points and carry-over chain start there too.
+add_executable(clock_origin_test cpp/clock_origin_test.cpp)
+target_link_libraries(clock_origin_test PRIVATE rulemonkey)
+
+add_test(
+    NAME clock_origin_test
+    COMMAND clock_origin_test ${_rulemonkey_test_dir}/cpp/time_dependent_rate_model.xml
+)
+
 # N-ary reactant rules (issues #24, #26): a rule such as `A + A + A -> P` used
 # to collapse its 2nd and 3rd patterns into the engine's single slot-B tail,
 # score zero embeddings, and never fire — with mass still conserved and

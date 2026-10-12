@@ -22,7 +22,11 @@
 // State continuation:
 //   --save-state <path>  Save full simulation state at t_end to file.
 //   --load-state <path>  Load state from file instead of seed species.
-//   --t-start <time>     Override t_start (default 0; use with --load-state).
+//   --t-start <time>     Start time (default 0).  From seed species, the
+//                        seed state sits at <time> on the model's clock and
+//                        the run spans t_end - <time> (issue #98).  With
+//                        --load-state it must match the saved time, which
+//                        it defaults to.
 //
 // Species output:
 //   --species <path>     After the run, write the final-state species
@@ -192,7 +196,7 @@ int main(int argc, char* argv[]) {
                     << " from loaded state\n";
         }
       } else {
-        sim.initialize(seed);
+        sim.initialize(seed, t_start);
       }
 
       result = sim.simulate(t_start, t_end, n_steps);
