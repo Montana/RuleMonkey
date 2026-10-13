@@ -1,0 +1,96 @@
+# The Arrhenius rate law, as BioNetGen's network builds it (issue #107).
+#
+# BioNetGen gives a rule with Arrhenius(phi, Ea0) the rate
+# exp(-(Ea0 + phi*dG)), with dG the free-energy change of the reaction the
+# rule writes, and the reverse half of a reversible rule
+# exp(-(Ea0 + (1-phi)*dG)), with dG its own reaction's (RateLaw.pm,
+# evaluate_local).  There is no RT: energies are in units of RT.  The model
+# has no parameter named RT; RuleMonkey divided every exponent by 2.478 when
+# a model had none.  phi = 0.3, so a rule that takes phi where BioNetGen
+# takes 1-phi, or the reverse, shows.  RuleMonkey gave every bond-breaking
+# rule the reverse-half term, and every bond-making rule the forward one.
+#
+#   Rev_bound    `Ra(b) + Rb(a) <-> Ra(b!1).Rb(a!1)` with dG = ln(100):
+#                k_on = 1e-5 per pair, k_off = 1e-3.
+#   Revu_bound   `Qa(b!1).Qb(a!1) <-> Qa(b) + Qb(a)`, the same kind of rule
+#                written in the unbinding direction, with dG = ln(10) for the
+#                binding: unbinding takes phi, 1e-4; binding takes 1-phi,
+#                1e-5 per pair.  RuleMonkey swapped the two terms.
+#   Bind_uni     `Ua(b) + Ub(a) -> Ua(b!1).Ub(a!1)`, unidirectional, with
+#                dG = ln(10): 1e-6 per pair.
+#   Break_uni    `Va(b!1).Vb(a!1) -> Va(b) + Vb(a)`, unidirectional, breaking
+#                a bond with dG = -ln(10): phi on the unbinding dG = ln(10),
+#                1e-3.  RuleMonkey took (phi-1) on the binding dG instead.
+#   Ctx_pair     `Sc(a) + Sa(s) <-> Sc(a!1).Sa(s!1)` with dG = ln(10), and a
+#   Ctx_bare     cooperative pattern Sa.Sc.Sb worth -2*ln(10): an Sa binds a
+#                scaffold that already holds an Sb (Ctx_pair) with net
+#                dG = -ln(10), and a bare one (Ctx_bare) with dG = ln(10).
+#
+# The references are BioNetGen's network, integrated (ode); every species is
+# 1000 or 500 copies, so the ODE is the mean of the SSA.
+begin model
+begin parameters
+  phi    0.3
+  Gr     4.605170185988092    # ln(100)
+  Ea0r   10.131374409173802   # ln(1e5) - phi*Gr
+  Gq     2.302585092994046    # ln(10)
+  Ea0q   9.901115899874398    # ln(1e4) + phi*Gq
+  Gu     2.302585092994046    # ln(10)
+  Ea0u   13.12473503006606    # ln(1e6) - phi*Gu
+  Gv    -2.302585092994046    # -ln(10)
+  Ea0v   6.216979751083923    # ln(1e3) + phi*Gv
+  Gc     2.302585092994046    # ln(10)
+  Gcoop -4.605170185988092    # -2*ln(10)
+  Ea0c   13.12473503006606    # ln(1e6) - phi*Gc
+end parameters
+begin molecule types
+  Ra(b)
+  Rb(a)
+  Qa(b)
+  Qb(a)
+  Ua(b)
+  Ub(a)
+  Va(b)
+  Vb(a)
+  Sc(a,b)
+  Sa(s)
+  Sb(s)
+end molecule types
+begin seed species
+  Ra(b)                     1000
+  Rb(a)                     1000
+  Qa(b!1).Qb(a!1)           1000
+  Ua(b)                     1000
+  Ub(a)                     1000
+  Va(b!1).Vb(a!1)           1000
+  Sc(a,b!1).Sb(s!1)          500
+  Sc(a,b)                    500
+  Sa(s)                     1000
+end seed species
+begin observables
+  Molecules  Rev_bound   Ra(b!1).Rb(a!1)
+  Molecules  Revu_bound  Qa(b!1).Qb(a!1)
+  Molecules  Bind_uni    Ua(b!1).Ub(a!1)
+  Molecules  Break_uni   Va(b!1).Vb(a!1)
+  Molecules  Ctx_pair    Sa(s!1).Sc(a!1,b!2).Sb(s!2)
+  Molecules  Ctx_bare    Sa(s!1).Sc(a!1,b)
+end observables
+begin energy patterns
+  Ra(b!1).Rb(a!1)               Gr
+  Qa(b!1).Qb(a!1)               Gq
+  Ua(b!1).Ub(a!1)               Gu
+  Va(b!1).Vb(a!1)               Gv
+  Sc(a!1).Sa(s!1)               Gc
+  Sa(s!1).Sc(a!1,b!2).Sb(s!2)   Gcoop
+end energy patterns
+begin reaction rules
+  Rev:    Ra(b) + Rb(a) <-> Ra(b!1).Rb(a!1)      Arrhenius(phi, Ea0r)
+  Revu:   Qa(b!1).Qb(a!1) <-> Qa(b) + Qb(a)      Arrhenius(phi, Ea0q)
+  Bind:   Ua(b) + Ub(a) -> Ua(b!1).Ub(a!1)       Arrhenius(phi, Ea0u)
+  Break:  Va(b!1).Vb(a!1) -> Va(b) + Vb(a)       Arrhenius(phi, Ea0v)
+  Ctx:    Sc(a) + Sa(s) <-> Sc(a!1).Sa(s!1)      Arrhenius(phi, Ea0c)
+end reaction rules
+end model
+begin actions
+  writeXML({overwrite=>1})
+end actions

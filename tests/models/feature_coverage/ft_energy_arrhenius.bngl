@@ -4,7 +4,11 @@
 # Expected: A+B<->AB equilibrium follows the Arrhenius rates derived from Gf
 # Note: no context conditions — the energy pattern is exactly the reaction
 #       center bond, so the rule expands to one forward + one reverse rule.
-#       k_fwd = exp(-(Ea0 + phi*Gf)/RT), k_rev = exp(-(Ea0 + (phi-1)*Gf)/RT).
+#       k_fwd = exp(-(Ea0 + phi*Gf)), k_rev = exp(-(Ea0 + (1-phi)*(-Gf))).
+# Note: RT = 1 keeps the NFsim reference on BioNetGen's rate law.  NFsim
+#       divides every Arrhenius exponent by a parameter named RT, or by 2.478
+#       if there is none (RuleWorld/nfsim#102); BioNetGen and RuleMonkey
+#       divide by nothing (issue #107), and here RT plays no other part.
 
 begin model
 begin parameters

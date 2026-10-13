@@ -9,7 +9,6 @@
       <Parameter id="phi" type="Constant" value="0.5" expr="0.5"/>
       <Parameter id="Ea0" type="Constant" value="6.9077553" expr="6.907755278982137"/>
       <Parameter id="G0" type="Constant" value="0" expr="0"/>
-      <Parameter id="RT" type="Constant" value="1" expr="1"/>
     </ListOfParameters>
     <ListOfMoleculeTypes>
       <MoleculeType id="Da">

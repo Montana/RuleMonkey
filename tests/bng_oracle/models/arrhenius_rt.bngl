@@ -1,0 +1,50 @@
+# A parameter named RT is an ordinary parameter (issue #107).
+#
+# BioNetGen's Arrhenius rate law applies no RT.  A model that works in kJ/mol
+# defines its own RT and divides by it where it uses it, as BioNetGen's
+# Models2/energy_example1.bngl does: Arrhenius(phi, Ea0/RT), and an energy
+# pattern worth Gf/RT.  RuleMonkey divided every exponent by the parameter
+# named RT as well, so such a model was divided twice.
+#
+#   Rev_bound    `Ra(b) + Rb(a) <-> Ra(b!1).Rb(a!1)  Arrhenius(phi, Ea0r/RT)`,
+#                energies in kJ/mol with RT = 2.5: the same rates as
+#                Rev_bound in arrhenius_formula, k_on = 1e-5 per pair and
+#                k_off = 1e-3.
+#   Break_uni    `Va(b!1).Vb(a!1) -> Va(b) + Vb(a)  Arrhenius(phi, Ea0v/RT)`:
+#                the same rate as Break_uni there, 1e-3.
+begin model
+begin parameters
+  RT     2.5
+  phi    0.3
+  Gr     11.51292546497023    # 2.5*ln(100), kJ/mol
+  Ea0r   25.328436022934504   # 2.5*(ln(1e5) - phi*ln(100)), kJ/mol
+  Gv    -5.756462732485115    # -2.5*ln(10), kJ/mol
+  Ea0v   15.542449377709808   # 2.5*(ln(1e3) - phi*ln(10)), kJ/mol
+end parameters
+begin molecule types
+  Ra(b)
+  Rb(a)
+  Va(b)
+  Vb(a)
+end molecule types
+begin seed species
+  Ra(b)            1000
+  Rb(a)            1000
+  Va(b!1).Vb(a!1)  1000
+end seed species
+begin observables
+  Molecules  Rev_bound  Ra(b!1).Rb(a!1)
+  Molecules  Break_uni  Va(b!1).Vb(a!1)
+end observables
+begin energy patterns
+  Ra(b!1).Rb(a!1)  Gr/RT
+  Va(b!1).Vb(a!1)  Gv/RT
+end energy patterns
+begin reaction rules
+  Rev:    Ra(b) + Rb(a) <-> Ra(b!1).Rb(a!1)   Arrhenius(phi, Ea0r/RT)
+  Break:  Va(b!1).Vb(a!1) -> Va(b) + Vb(a)    Arrhenius(phi, Ea0v/RT)
+end reaction rules
+end model
+begin actions
+  writeXML({overwrite=>1})
+end actions

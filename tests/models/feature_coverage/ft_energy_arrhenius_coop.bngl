@@ -11,6 +11,10 @@
 #       free (Keq~2.7) and poorly when it is occupied (Keq~0.37), so the
 #       context conditions matter at steady state — the equilibrium stays
 #       partial (mostly singly-bound S) rather than saturating.
+# Note: RT = 1 keeps the NFsim reference on BioNetGen's rate law.  NFsim
+#       divides every Arrhenius exponent by a parameter named RT, or by 2.478
+#       if there is none (RuleWorld/nfsim#102); BioNetGen and RuleMonkey
+#       divide by nothing (issue #107), and here RT plays no other part.
 
 begin model
 begin parameters

@@ -59,6 +59,8 @@ MODELS = {
     "product_split": {"kind": "ode", "t_end": 500, "n_steps": 2},
     "product_split_full": {"kind": "ode", "t_end": 500, "n_steps": 2},
     "products_never_form": {"kind": "ode", "t_end": 500, "n_steps": 2},
+    "arrhenius_formula": {"kind": "ode", "t_end": 500, "n_steps": 2},
+    "arrhenius_rt": {"kind": "ode", "t_end": 500, "n_steps": 2},
 }
 
 

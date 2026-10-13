@@ -387,7 +387,7 @@ void test_out_of_order_cascade(const std::string& xml) {
 // set_param on an energy parameter must re-resolve those baked rates in
 // apply_overrides.  Were it a silent no-op, the three runs below would be
 // bit-identical.  Model: A(b)+B(a)<->A(b!1).B(a!1) Arrhenius(phi,Ea0) with
-// energy pattern A(b!1).B(a!1)=Gf; the equilibrium constant is exp(-Gf/RT),
+// energy pattern A(b!1).B(a!1)=Gf; the equilibrium constant is exp(-Gf),
 // so more-negative Gf binds more, more-positive Gf binds less.
 void test_energy_setparam(const std::string& xml) {
   auto ab = [](const rulemonkey::Result& r) { return final_value(r, "AB"); };

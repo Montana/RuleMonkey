@@ -641,6 +641,19 @@ add_test(
         ${_rulemonkey_test_dir}/bng_oracle/xml/products_never_form.xml
 )
 
+# Arrhenius rates under a parameter override (issue #107): once a parameter
+# is overridden, each expanded rule's rate is re-resolved from its expression
+# rather than the number computed at load.  The BNG2-oracle suite overrides
+# nothing, so this runs its two Arrhenius models with a no-op override and
+# scores them against the same BNG2 references.
+add_executable(arrhenius_set_param_test cpp/arrhenius_set_param_test.cpp)
+target_link_libraries(arrhenius_set_param_test PRIVATE rulemonkey)
+
+add_test(
+    NAME arrhenius_set_param_test
+    COMMAND arrhenius_set_param_test ${_rulemonkey_test_dir}/bng_oracle
+)
+
 # Global-function exposure regression (issue #7): pins down that
 # Result::function_names / function_data, RuleMonkeySimulator::function_names()
 # and get_function_values() expose BNGL global-function values, that the
