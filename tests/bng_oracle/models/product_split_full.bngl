@@ -1,0 +1,130 @@
+# The `+` and `.` between product patterns, in the shapes a check made bond
+# by bond cannot decide (issue #104, and the shapes found with it).
+#
+# BioNetGen applies all of a rule's operations, then splits the result into
+# connected components (SpeciesGraph::splitConnectedComponents) and checks
+# them (RxnRule::apply_rule).  A component holding molecules the rule maps
+# into two product patterns breaks a `+`.  A product pattern whose molecules
+# lie in two components breaks a `.`.  A component holding none of the
+# molecules the rule names is a species the rule does not write, which only
+# DeleteMolecules allows.  RuleMonkey tested the `+` and `.` at the two ends
+# of each deleted bond.  That cannot decide a molecule deleted out of a
+# complex, a reactant pattern cut into three pieces, or a molecule joined to
+# its pattern only by `.`; and with DeleteMolecules it tested nothing.
+#
+#   Plus_chain   `A(b!1).B(a!1,c!2).C(b!2) -> A(b) + C(b)  DeleteMolecules`
+#                on a chain A-B-C: A and C come apart, so it fires at k.
+#   Plus_ring    the same rule where A and C are also bonded: the `+` cannot
+#                hold, so it never fires.  RuleMonkey fired it.
+#   Plus_extra   the same rule on a chain whose B also holds a Y: fires at k,
+#                and the Y goes free as a third species, which the keyword
+#                allows.
+#   Dot_ring     `E(f!1).F(e!1,g!2).G(f!2) -> E(f).G(f)  DeleteMolecules` on
+#                a ring E-F-G-E: E and G stay bonded, so it fires at k.
+#   Dot_chain    the same rule on a chain: the `.` cannot hold, so it never
+#                fires.  RuleMonkey fired it.
+#   Count_chain  `Xk(c!1).Ck(x!1,y!2).Yk(c!2) -> Xk(c) + Yk(c)`, no keyword,
+#                on a chain Xk-Ck-Yk: fires at k (control).
+#   Count_ring   the same rule where Xk and Yk are also bonded and the Ck
+#                also holds an Ek.  Deleting the Ck leaves two species, the
+#                Xk.Yk ring and the Ek, as many as the rule has product
+#                patterns.  But Xk and Yk stay joined across the `+`, and the
+#                Ek is a species the rule does not write, so it never fires.
+#                RuleMonkey, which counted species, fired it.
+#   Three_chain  `Ta(b!1,c!2).Tb(a!1).Tc(a!2) -> Ta(b,c) + Tb(a) + Tc(a)` on
+#                a chain Tb-Ta-Tc: fires at k.
+#   Three_ring   the same rule where Tb and Tc are also bonded: they stay
+#                joined across a `+`, so it never fires.  RuleMonkey fired it,
+#                the two ends of each deleted bond coming apart.
+#   Pair_ring    `Ua(b!1,c!2).Ub(a!1).Uc(a!2) -> Ua(b,c) + Ub(a).Uc(a)` where
+#                Ub and Uc are also bonded: the `.` holds, so it fires at k.
+#   Pair_chain   the same rule on a chain Ub-Ua-Uc: Ub and Uc come apart, so
+#                it never fires.  RuleMonkey fired it.
+#   Dotted_onX   `Pj(x!1).Xj(p!1).Qj(t~0) -> Pj(x) + Xj(p).Qj(t~1)`, the Qj
+#                joined to the pattern only by `.`, on a chain Pj-Xj-Qj: the
+#                Qj leaves with the Xj, so it fires at k.
+#   Dotted_onP   the same rule where the Qj hangs off the Pj: it would leave
+#                with the Pj, across the `+` and away from the Xj, so it never
+#                fires.  RuleMonkey fired it.
+#   Dotted_held  `Hp(x!1,y!2).Hx(p!1,q!2).Hq(t~0) -> Hp(x,y!2).Hx(p,q!2) +
+#                Hq(t~1)` deletes one of two Hp-Hx bonds, which leaves them
+#                joined, and the Hq, joined to the pattern only by `.`, hangs
+#                off the Hp: nothing parts it from them, so it never fires.
+#                RuleMonkey fired it.
+#
+# Every rule is unimolecular, so each column follows N*exp(-k*t) or stays N.
+begin model
+begin parameters
+  N     1000
+  k     1.0e-3
+end parameters
+begin molecule types
+  A(b,x)
+  B(a,c,y)
+  C(b,x)
+  Y(b)
+  E(f,x)
+  F(e,g)
+  G(f,x)
+  Xk(c,y)
+  Ck(x,y,e)
+  Yk(c,x)
+  Ek(c)
+  Ta(b,c)
+  Tb(a,x)
+  Tc(a,x)
+  Ua(b,c)
+  Ub(a,x)
+  Uc(a,x)
+  Pj(x,q)
+  Xj(p,q)
+  Qj(z,t~0~1)
+  Hp(x,y,z)
+  Hx(p,q)
+  Hq(w,t~0~1)
+end molecule types
+begin seed species
+  A(b!1,x).B(a!1,c!2,y).C(b!2,x)               N
+  A(b!1,x!3).B(a!1,c!2,y).C(b!2,x!3)           N
+  A(b!1,x).B(a!1,c!2,y!4).C(b!2,x).Y(b!4)      N
+  E(f!1,x!3).F(e!1,g!2).G(f!2,x!3)             N
+  E(f!1,x).F(e!1,g!2).G(f!2,x)                 N
+  Xk(c!1,y).Ck(x!1,y!2,e).Yk(c!2,x)            N
+  Xk(c!1,y!3).Ck(x!1,y!2,e!4).Yk(c!2,x!3).Ek(c!4)  N
+  Ta(b!1,c!2).Tb(a!1,x).Tc(a!2,x)              N
+  Ta(b!1,c!2).Tb(a!1,x!3).Tc(a!2,x!3)          N
+  Ua(b!1,c!2).Ub(a!1,x!3).Uc(a!2,x!3)          N
+  Ua(b!1,c!2).Ub(a!1,x).Uc(a!2,x)              N
+  Pj(x!1,q).Xj(p!1,q!2).Qj(z!2,t~0)            N
+  Pj(x!1,q!2).Xj(p!1,q).Qj(z!2,t~0)            N
+  Hp(x!1,y!2,z!3).Hx(p!1,q!2).Hq(w!3,t~0)      N
+end seed species
+begin observables
+  Molecules  Plus_chain   A(b!1,x).B(a!1,c!2,y).C(b!2,x)
+  Molecules  Plus_ring    A(b!1,x!3).B(a!1,c!2,y).C(b!2,x!3)
+  Molecules  Plus_extra   A(b!1,x).B(a!1,c!2,y!4).C(b!2,x).Y(b!4)
+  Molecules  Dot_ring     E(f!1,x!3).F(e!1,g!2).G(f!2,x!3)
+  Molecules  Dot_chain    E(f!1,x).F(e!1,g!2).G(f!2,x)
+  Molecules  Count_chain  Xk(c!1,y).Ck(x!1,y!2,e).Yk(c!2,x)
+  Molecules  Count_ring   Xk(c!1,y!3).Ck(x!1,y!2,e!4).Yk(c!2,x!3).Ek(c!4)
+  Molecules  Three_chain  Ta(b!1,c!2).Tb(a!1,x).Tc(a!2,x)
+  Molecules  Three_ring   Ta(b!1,c!2).Tb(a!1,x!3).Tc(a!2,x!3)
+  Molecules  Pair_ring    Ua(b!1,c!2).Ub(a!1,x!3).Uc(a!2,x!3)
+  Molecules  Pair_chain   Ua(b!1,c!2).Ub(a!1,x).Uc(a!2,x)
+  Molecules  Dotted_onX   Pj(x!1,q).Xj(p!1,q!2).Qj(z!2,t~0)
+  Molecules  Dotted_onP   Pj(x!1,q!2).Xj(p!1,q).Qj(z!2,t~0)
+  Molecules  Dotted_held  Hp(x!1,y!2,z!3).Hx(p!1,q!2).Hq(w!3,t~0)
+end observables
+begin reaction rules
+  CutPlus: A(b!1).B(a!1,c!2).C(b!2) -> A(b) + C(b)   k  DeleteMolecules
+  CutDot:  E(f!1).F(e!1,g!2).G(f!2) -> E(f).G(f)     k  DeleteMolecules
+  Count:   Xk(c!1).Ck(x!1,y!2).Yk(c!2) -> Xk(c) + Yk(c)   k
+  Three:   Ta(b!1,c!2).Tb(a!1).Tc(a!2) -> Ta(b,c) + Tb(a) + Tc(a)   k
+  Pair:    Ua(b!1,c!2).Ub(a!1).Uc(a!2) -> Ua(b,c) + Ub(a).Uc(a)    k
+  Dotted:  Pj(x!1).Xj(p!1).Qj(t~0) -> Pj(x) + Xj(p).Qj(t~1)        k
+  Held:    Hp(x!1,y!2).Hx(p!1,q!2).Hq(t~0) -> Hp(x,y!2).Hx(p,q!2) + Hq(t~1)   k
+end reaction rules
+end model
+begin actions
+  writeXML({overwrite=>1})
+end actions

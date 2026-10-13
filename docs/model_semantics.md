@@ -68,13 +68,19 @@ The runtime severity model is two-level:
     lists its molecules in, and NFsim's `-cb` / `-bscb` do not change it.
   - **Some molecules of a pattern, no `DeleteMolecules`**
     (`C(x!1).D(x!1) -> D(x)`): only those molecules. The reaction happens
-    only if what is left forms exactly as many species as the rule has
-    product patterns, so this rule does not fire on a C that also holds an
-    E (deleting it would leave the D and the E apart). RM used to delete the
-    whole species here, taking the kept D with it. NFsim refuses such a rule
-    at load.
+    only if what is left forms exactly the rule's product patterns: each
+    one a species of its own, and no other species. So this rule does not
+    fire on a C that also holds an E (deleting it would leave the D and the
+    E apart). RM used to delete the whole species here, taking the kept D
+    with it. NFsim refuses such a rule at load.
   - **`DeleteMolecules`**: only the named molecules, and the remainder may
-    split into more species than the rule has product patterns.
+    split into more species than the rule has product patterns, the extra
+    ones holding none of the molecules the rule names. The `+` and `.`
+    between the molecules it does name still hold (issue #104):
+    `A(b!1).B(a!1,c!2).C(b!2) -> A(b) + C(b) DeleteMolecules` does not fire
+    where A and C are also bonded to each other, and the same rule written
+    `-> A(b).C(b)` fires only there. RM used to skip the product check
+    altogether under the keyword.
 
 ### Rate laws
 
@@ -369,6 +375,33 @@ The runtime severity model is two-level:
   one reactant pattern. It checked one deleted bond at a time, and it
   treated every deleted bond of a rule with several product patterns as a
   `+`.
+- Testing the two ends of each deleted bond decides the `+` and `.` only
+  when each reactant pattern is held together by its own bonds, is cut by
+  them into at most two pieces, and loses no molecule out of its complex.
+  For every other shape RM splits the whole post-reaction graph, as BNG2
+  does: no complex may hold molecules of two product patterns, no product
+  pattern may lie in two complexes, and only `DeleteMolecules` allows a
+  complex holding none of the molecules the rule names (issue #104). The
+  shapes are a molecule deleted out of a complex
+  (`A(b!1).B(a!1,c!2).C(b!2) -> A(b) + C(b)`), a pattern cut into three
+  pieces (`Ta(b!1,c!2).Tb(a!1).Tc(a!2) -> Ta(b,c) + Tb(a) + Tc(a)` on a
+  Ta.Tb.Tc ring, which never fires), and a molecule joined to its pattern
+  only by `.`. The loader decides which rules need it; the `+` part of the
+  split follows this flag, except for a delete without `DeleteMolecules`,
+  which NFsim refuses and RM always tests in full.
+- A rule whose right-hand side can never be true never fires, as in BNG2,
+  which generates no reaction for it (issue #105). One kind writes two
+  molecules into one product pattern that nothing joins: they come from
+  different reactant patterns, which sit in different complexes, or the
+  rule creates one of them, and no bond it adds joins them
+  (`A(s~0) + B(a) -> A(s~1).B(a)`). That rule never fires under either
+  setting of the flag. The other kind writes two molecules of one complex
+  into different product patterns and deletes no bond or molecule that
+  could part them (`A(s~0).B(t~0) -> A(s~1) + B(t~1)`). That one never
+  fires under this flag; with it off, the `+` is not tested and the rule
+  fires, as a deleted bond's would. Either way the load reports the rule as
+  a warning, not an error: BNG2 runs the model, and the rule is almost
+  surely a mistake.
 
 ### Parameter overrides
 

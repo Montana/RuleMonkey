@@ -1,0 +1,80 @@
+# A rule whose right-hand side can never be true (issue #105, and its mirror
+# image).
+#
+# BioNetGen generates no reaction for a rule that writes two molecules in one
+# product pattern when nothing in the rule can bring them into one complex:
+# they start in different reactant patterns, which sit in different
+# complexes, or the rule creates one of them, and no bond the rule adds joins
+# them.  Nor for a rule that writes two molecules of one complex into
+# different product patterns and deletes no bond or molecule that could part
+# them.  RuleMonkey fired both kinds.
+#
+#   Join_on   `Ja(s~0) + Jb(t~0) -> Ja(s~1).Jb(t~1)`: never fires.
+#             RuleMonkey fired it at k2 between two pools of N.
+#   Bare_on   `Ka(s~0) + Kb() -> Ka(s~1).Kb()`, the same with a Kb the rule
+#             names by no component, so only the Map's molecule entries
+#             place it: never fires.  RuleMonkey fired it at k2*N.
+#   Lone_on   `La(s~0) + Ld(x) -> La(s~1).Lb(a) + Ld(x)` creates an Lb and
+#             bonds it to nothing: never fires.  RuleMonkey fired it.
+#   Bound_on  `Ma(s~0,b) + Md(x) -> Ma(s~1,b!1).Mb(a!1) + Md(x)` bonds the
+#             Mb it creates (control): fires at k2*N, Md being conserved.
+#   Apart_on  `Sa(s~0).Sb(t~0) -> Sa(s~1) + Sb(t~1)` on an Sa-Sb pair: the
+#             bond stays, so it never fires.  RuleMonkey fired it.
+#   Cut_on    `Ca(s~0,b!1).Cb(t~0,a!1) -> Ca(s~1,b) + Cb(t~1,a)` deletes the
+#             bond (control): fires at k.
+#
+# Each column is 0 or follows N*(1 - exp(-r*t)), with r = k2*N or k.
+begin model
+begin parameters
+  N     1000
+  k     1.0e-3
+  k2    1.0e-6
+end parameters
+begin molecule types
+  Ja(s~0~1)
+  Jb(t~0~1)
+  Ka(s~0~1)
+  Kb(x)
+  La(s~0~1)
+  Lb(a)
+  Ld(x)
+  Ma(s~0~1,b)
+  Mb(a)
+  Md(x)
+  Sa(s~0~1,b)
+  Sb(t~0~1,a)
+  Ca(s~0~1,b)
+  Cb(t~0~1,a)
+end molecule types
+begin seed species
+  Ja(s~0)                    N
+  Jb(t~0)                    N
+  Ka(s~0)                    N
+  Kb(x)                      N
+  La(s~0)                    N
+  Ld(x)                      N
+  Ma(s~0,b)                  N
+  Md(x)                      N
+  Sa(s~0,b!1).Sb(t~0,a!1)    N
+  Ca(s~0,b!1).Cb(t~0,a!1)    N
+end seed species
+begin observables
+  Molecules  Join_on   Ja(s~1)
+  Molecules  Bare_on   Ka(s~1)
+  Molecules  Lone_on   La(s~1)
+  Molecules  Bound_on  Ma(s~1)
+  Molecules  Apart_on  Sa(s~1)
+  Molecules  Cut_on    Ca(s~1)
+end observables
+begin reaction rules
+  Join:   Ja(s~0) + Jb(t~0) -> Ja(s~1).Jb(t~1)                    k2
+  Bare:   Ka(s~0) + Kb() -> Ka(s~1).Kb()                          k2
+  Lone:   La(s~0) + Ld(x) -> La(s~1).Lb(a) + Ld(x)                k2
+  Bound:  Ma(s~0,b) + Md(x) -> Ma(s~1,b!1).Mb(a!1) + Md(x)        k2
+  Apart:  Sa(s~0).Sb(t~0) -> Sa(s~1) + Sb(t~1)                    k
+  Cut:    Ca(s~0,b!1).Cb(t~0,a!1) -> Ca(s~1,b) + Cb(t~1,a)        k
+end reaction rules
+end model
+begin actions
+  writeXML({overwrite=>1})
+end actions

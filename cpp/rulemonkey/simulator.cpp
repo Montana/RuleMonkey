@@ -20,6 +20,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -651,6 +652,7 @@ Rule build_energy_binding_rule(const Model& model, const std::string& name,
   r.reactant_to_product_map.assign(n, -1);
   for (int i = 0; i < n; ++i)
     r.reactant_to_product_map[i] = i;
+  r.reactant_mol_to_product_mol = {0, 1};
 
   r.same_components = (t1_name == t2_name && site1 == site2);
   r.rate_law.type = RateLawType::Ele;
@@ -718,6 +720,7 @@ Rule build_energy_unbinding_rule(const Model& model, const std::string& name,
   r.reactant_to_product_map.assign(n, -1);
   for (int i = 0; i < n; ++i)
     r.reactant_to_product_map[i] = i;
+  r.reactant_mol_to_product_mol = {0, 1};
 
   r.same_components = (t1_name == t2_name && site1 == site2);
   r.rate_law.type = RateLawType::Ele;
@@ -892,35 +895,228 @@ TfunMethod parse_tfun_method(const std::string& s) {
   throw std::runtime_error("Unknown TFUN method '" + s + "'");
 }
 
-// Resolve TFUN counter source
 // The product pattern a reactant-pattern component lands in, through the
 // rule's map, or -1 when the map does not carry it there (its molecule is
 // deleted, or the XML has no Map).
 int product_pattern_of(const Rule& rule, int reactant_flat) {
   if (reactant_flat < 0 || reactant_flat >= static_cast<int>(rule.reactant_to_product_map.size()))
     return -1;
-  int const product_flat = rule.reactant_to_product_map[reactant_flat];
-  if (product_flat < 0)
-    return -1;
-  int product_mol = -1;
-  int base = 0;
-  for (int mi = 0; mi < static_cast<int>(rule.product_pattern.molecules.size()); ++mi) {
-    int const nc = static_cast<int>(rule.product_pattern.molecules[mi].components.size());
-    if (product_flat < base + nc) {
-      product_mol = mi;
-      break;
-    }
-    base += nc;
-  }
-  if (product_mol < 0)
-    return -1;
-  int pattern = -1;
-  for (int pi = 0; pi < static_cast<int>(rule.product_pattern_starts.size()); ++pi)
-    if (rule.product_pattern_starts[pi] <= product_mol)
-      pattern = pi;
-  return pattern;
+  return rule.product_pattern_of_mol(
+      rule.product_pattern.mol_of_flat(rule.reactant_to_product_map[reactant_flat]));
 }
 
+// Settle Rule::products_never_join, products_never_split and
+// checks_product_split (issues #104, #105).  BNG2 applies all of a rule's
+// operations, then splits the result into connected components
+// (SpeciesGraph::splitConnectedComponents, RxnRule::apply_rule).  A
+// component may not hold molecules of two product patterns (the `+`), a
+// product pattern may not lie in two components (the `.`), and a component
+// holding none of the molecules the rule names is allowed only under
+// DeleteMolecules.
+//
+// Under -bscb each reactant pattern starts in a complex of its own, and only
+// a bond the rule adds joins two of them.  So the reactant patterns, and the
+// molecules the rule adds, fall into groups joined by the added bonds, and
+// each group ends up in one complex unless the rule deletes a bond or a
+// molecule in it.  A product pattern spread over two groups can never form.
+// A group the rule writes into two product patterns, and deletes nothing
+// in, can never come apart.  Everything else is decided per event.  The
+// bond-by-bond checks decide it exactly when every reactant pattern is held
+// together by its own bonds, its deleted bonds cut it into at most two
+// pieces, and the rule deletes no molecule out of a complex: each piece is
+// then one product pattern's, and testing the bonds between the two pieces
+// tests the pieces.  Otherwise the engine splits the whole post-reaction
+// graph.  A rule the Map does not fully resolve gets no static verdict.
+void classify_product_split(Rule& rule) {
+  // A molecule deleted without the keyword may leave a species the rule does
+  // not write, whatever the rest of the rule, so it always takes the split.
+  rule.checks_product_split =
+      std::any_of(rule.operations.begin(), rule.operations.end(), [](const RuleOp& op) {
+        return op.type == OpType::DeleteMolecule && op.delete_requires_product_count;
+      });
+  auto const& rp = rule.reactant_pattern;
+  auto const& pp = rule.product_pattern;
+  int const n_rp = static_cast<int>(rule.reactant_pattern_starts.size());
+  int const n_rmol = static_cast<int>(rp.molecules.size());
+  int const n_pmol = static_cast<int>(pp.molecules.size());
+  int const n_pp = rule.n_product_patterns;
+  if (static_cast<int>(rule.reactant_mol_to_product_mol.size()) != n_rmol ||
+      static_cast<int>(rule.product_pattern_starts.size()) != n_pp)
+    return;
+  auto rp_of = [&](int mi) {
+    int r = -1;
+    for (int i = 0; i < n_rp; ++i)
+      if (rule.reactant_pattern_starts[i] <= mi)
+        r = i;
+    return r;
+  };
+  auto find = [](std::vector<int>& parent, int x) {
+    while (parent[x] != x)
+      x = parent[x] = parent[parent[x]];
+    return x;
+  };
+  auto fresh = [](int n) {
+    std::vector<int> parent(n);
+    for (int i = 0; i < n; ++i)
+      parent[i] = i;
+    return parent;
+  };
+
+  // The molecules the rule deletes, and whether it deletes one out of a
+  // complex rather than the whole species.
+  std::vector<char> deleted(n_rmol, 0);
+  bool deletes_from_complex = false;
+  for (const auto& op : rule.operations) {
+    if (op.type != OpType::DeleteMolecule)
+      continue;
+    int const mi = op.delete_pattern_mol_idx;
+    if (mi < 0 || mi >= n_rmol)
+      return;
+    if (op.delete_connected) {
+      for (int m = 0; m < n_rmol; ++m)
+        if (rp_of(m) == rp_of(mi))
+          deleted[m] = 1;
+    } else {
+      deleted[mi] = 1;
+      deletes_from_complex = true;
+    }
+  }
+
+  // Group nodes: one per reactant pattern, then one per product molecule
+  // (used only for the ones the rule adds).
+  int const n_nodes = n_rp + n_pmol;
+  std::vector<int> node_of(n_pmol, -1);
+  for (int mi = 0; mi < n_rmol; ++mi) {
+    int const pm = rule.reactant_mol_to_product_mol[mi];
+    if (pm >= 0 && pm < n_pmol)
+      node_of[pm] = rp_of(mi);
+    else if (deleted[mi] == 0)
+      return; // the Map places this molecule nowhere
+  }
+  for (const auto& op : rule.operations)
+    if (op.type == OpType::AddMolecule && op.add_product_mol_idx >= 0 &&
+        op.add_product_mol_idx < n_pmol)
+      node_of[op.add_product_mol_idx] = n_rp + op.add_product_mol_idx;
+  for (int const node : node_of)
+    if (node < 0)
+      return; // a product molecule that comes from nowhere
+
+  std::vector<int> group = fresh(n_nodes);
+  auto end_node = [&](int flat, int product_mol) {
+    if (flat >= 0) {
+      int const mi = rp.mol_of_flat(flat);
+      return mi >= 0 ? rp_of(mi) : -1;
+    }
+    return (product_mol >= 0 && product_mol < n_pmol) ? node_of[product_mol] : -1;
+  };
+  for (const auto& op : rule.operations) {
+    if (op.type != OpType::AddBond)
+      continue;
+    int const a = end_node(op.comp_flat_a, op.product_mol_a);
+    int const b = end_node(op.comp_flat_b, op.product_mol_b);
+    if (a < 0 || b < 0)
+      return;
+    group[find(group, a)] = find(group, b);
+  }
+  std::vector<char> cut(n_nodes, 0); // by group root
+  for (const auto& op : rule.operations) {
+    if (op.type == OpType::DeleteBond) {
+      for (int const flat : {op.comp_flat_a, op.comp_flat_b}) {
+        int const mi = rp.mol_of_flat(flat);
+        if (mi >= 0)
+          cut[find(group, rp_of(mi))] = 1;
+      }
+    } else if (op.type == OpType::DeleteMolecule) {
+      cut[find(group, rp_of(op.delete_pattern_mol_idx))] = 1;
+    }
+  }
+
+  // Each product pattern's group, and each group's product pattern (-2 for
+  // two or more).
+  std::vector<int> group_of_pattern(n_pp, -1);
+  std::vector<int> pattern_of_group(n_nodes, -1);
+  bool never_join = false;
+  for (int pm = 0; pm < n_pmol; ++pm) {
+    int const p = rule.product_pattern_of_mol(pm);
+    if (p < 0)
+      return;
+    int const g = find(group, node_of[pm]);
+    if (group_of_pattern[p] < 0)
+      group_of_pattern[p] = g;
+    else if (group_of_pattern[p] != g)
+      never_join = true;
+    if (pattern_of_group[g] == -1)
+      pattern_of_group[g] = p;
+    else if (pattern_of_group[g] != p)
+      pattern_of_group[g] = -2;
+  }
+  bool never_split = false;
+  bool plus_open = false; // a `+` some event could break
+  for (int g = 0; g < n_nodes; ++g) {
+    if (pattern_of_group[g] != -2)
+      continue;
+    if (cut[g] != 0)
+      plus_open = true;
+    else
+      never_split = true;
+  }
+
+  // A `.` some event could break: a product pattern its own bonds do not
+  // hold together, in a group the rule cuts.
+  std::vector<int> held = fresh(n_pmol);
+  for (const auto& b : pp.bonds) {
+    int const a = pp.mol_of_flat(b.comp_flat_a);
+    int const c = pp.mol_of_flat(b.comp_flat_b);
+    if (a >= 0 && c >= 0)
+      held[find(held, a)] = find(held, c);
+  }
+  bool dot_open = false;
+  for (int pm = 0; pm < n_pmol; ++pm) {
+    int const p = rule.product_pattern_of_mol(pm);
+    int const first = rule.product_pattern_starts[p];
+    if (find(held, pm) != find(held, first) && cut[group_of_pattern[p]] != 0)
+      dot_open = true;
+  }
+
+  // Can the bond-by-bond checks decide the rule?  Each reactant pattern must
+  // be held together by its own bonds and cut by its deleted bonds into at
+  // most two pieces.
+  bool by_bond = !deletes_from_complex;
+  std::vector<int> whole = fresh(n_rmol);
+  std::vector<int> after = fresh(n_rmol);
+  for (const auto& b : rp.bonds) {
+    int const a = rp.mol_of_flat(b.comp_flat_a);
+    int const c = rp.mol_of_flat(b.comp_flat_b);
+    if (a < 0 || c < 0)
+      continue;
+    whole[find(whole, a)] = find(whole, c);
+    bool const broken =
+        std::any_of(rule.operations.begin(), rule.operations.end(), [&](const RuleOp& op) {
+          return op.type == OpType::DeleteBond &&
+                 ((op.comp_flat_a == b.comp_flat_a && op.comp_flat_b == b.comp_flat_b) ||
+                  (op.comp_flat_a == b.comp_flat_b && op.comp_flat_b == b.comp_flat_a));
+        });
+    if (!broken)
+      after[find(after, a)] = find(after, c);
+  }
+  for (int r = 0; r < n_rp && by_bond; ++r) {
+    std::set<int> wholes;
+    std::set<int> pieces;
+    for (int mi = 0; mi < n_rmol; ++mi) {
+      if (rp_of(mi) != r || deleted[mi] != 0)
+        continue;
+      wholes.insert(find(whole, mi));
+      pieces.insert(find(after, mi));
+    }
+    by_bond = wholes.size() <= 1 && pieces.size() <= 2;
+  }
+
+  rule.products_never_join = never_join;
+  rule.products_never_split = never_split;
+  rule.checks_product_split = rule.checks_product_split || ((plus_open || dot_open) && !by_bond);
+}
+
+// Resolve TFUN counter source
 TfunCounterSource resolve_tfun_counter(const std::string& ctr_name,
                                        const std::unordered_map<std::string, double>& params,
                                        const std::unordered_set<std::string>& obs_names,
@@ -1608,7 +1804,9 @@ Model load_model(const std::string& xml_path,
       // Map: reactant -> product component mapping
       auto* map_node = find_child(rrn, "Map");
       int const n_rcomp = rule.reactant_pattern.flat_comp_count();
+      int const n_rmol = static_cast<int>(rule.reactant_pattern.molecules.size());
       rule.reactant_to_product_map.assign(n_rcomp, -1);
+      rule.reactant_mol_to_product_mol.assign(n_rmol, -1);
       if (map_node) {
         for (auto& mi : map_node->children) {
           if (mi.name != "MapItem")
@@ -1627,9 +1825,19 @@ Model load_model(const std::string& xml_path,
                   rule.product_pattern.flat_index(tit->second.first, tit->second.second);
               if (src_flat >= 0 && src_flat < n_rcomp)
                 rule.reactant_to_product_map[src_flat] = tgt_flat;
+            } else if (sit->second.second < 0 && tit->second.second < 0 &&
+                       reactant_pattern_ids.count(src) == 0 && sit->second.first < n_rmol) {
+              rule.reactant_mol_to_product_mol[sit->second.first] = tit->second.first;
             }
           }
         }
+      }
+      // A Map that names only components still places their molecules.
+      for (int flat = 0; flat < n_rcomp; ++flat) {
+        int const mi = rule.reactant_pattern.mol_of_flat(flat);
+        int const pm = rule.product_pattern.mol_of_flat(rule.reactant_to_product_map[flat]);
+        if (mi >= 0 && pm >= 0 && rule.reactant_mol_to_product_mol[mi] < 0)
+          rule.reactant_mol_to_product_mol[mi] = pm;
       }
 
       // Operations
@@ -2096,13 +2304,16 @@ Model load_model(const std::string& xml_path,
   // engine checks those and only those.  The energy-expanded rules above
   // carry an identity map and their own product_pattern_starts, so they are
   // marked the same way.
-  for (auto& rule : model.rules)
+  // The rest of the `+` and `.` is settled per rule (#104, #105).
+  for (auto& rule : model.rules) {
     for (auto& op : rule.operations)
       if (op.type == OpType::DeleteBond) {
         int const pa = product_pattern_of(rule, op.comp_flat_a);
         int const pb = product_pattern_of(rule, op.comp_flat_b);
         op.separates_products = pa >= 0 && pb >= 0 && pa != pb;
       }
+    classify_product_split(rule);
+  }
 
   // ---- Mark rate-dependent observables ----
   // An observable is rate-dependent only if it is transitively reachable
@@ -2437,6 +2648,33 @@ Model load_model(const std::string& xml_path,
                "negative, and meaningless where it does not). Fix the parameter. Pass "
                "--ignore-unsupported to run anyway; the rule's propensity is clamped "
                "to zero, so it will not fire."});
+    }
+    // WARN-level: a rule whose products can never be what it writes (issue
+    // #105, and its mirror image; see classify_product_split).  BNG2 accepts
+    // the model and generates no reaction for the rule, so the model has a
+    // definite meaning, the rule contributing nothing, and RM runs it that
+    // way rather than refuse what BNG2 runs.  Such a rule is almost surely a
+    // mistake, so say so.
+    for (const auto& rule : model.rules) {
+      if (rule.products_never_join)
+        unsupported_out->push_back(
+            {Severity::Warn, "ReactionRule",
+             "Rule '" + rule.id + "' (" + rule.name +
+                 ") writes molecules into one product pattern that nothing in the rule "
+                 "brings into one complex: they come from different reactant patterns, "
+                 "or the rule creates one of them, and no bond the rule adds joins them. "
+                 "BioNetGen generates no reaction for such a rule, and RM never fires it. "
+                 "Bond the molecules, or write a + between them."});
+      if (rule.products_never_split)
+        unsupported_out->push_back(
+            {Severity::Warn, "ReactionRule",
+             "Rule '" + rule.id + "' (" + rule.name +
+                 ") writes molecules that start in one complex into different product "
+                 "patterns, and deletes no bond or molecule that could part them. "
+                 "BioNetGen generates no reaction for such a rule, and RM never fires it "
+                 "while block_same_complex_binding (the default) enforces the + between "
+                 "product patterns. Delete the bond that holds them together, or write a "
+                 ". between them."});
     }
 
     // The `TotalRate` keyword.  BNG2.pl does not implement it for network

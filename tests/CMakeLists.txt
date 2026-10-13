@@ -628,6 +628,19 @@ add_test(
         ${_rulemonkey_test_dir}/cpp/species_delete_api_model.xml
 )
 
+# A rule whose products can never be what it writes (issue #105, and its
+# mirror image): reported as a Warn rather than refused, never fired, and the
+# mirror case left to the `+` setting, block_same_complex_binding.  The counts
+# are pinned against BNG2 by the same model in the BNG2-oracle suite.
+add_executable(products_never_form_test cpp/products_never_form_test.cpp)
+target_link_libraries(products_never_form_test PRIVATE rulemonkey)
+
+add_test(
+    NAME products_never_form_test
+    COMMAND products_never_form_test
+        ${_rulemonkey_test_dir}/bng_oracle/xml/products_never_form.xml
+)
+
 # Global-function exposure regression (issue #7): pins down that
 # Result::function_names / function_data, RuleMonkeySimulator::function_names()
 # and get_function_values() expose BNGL global-function values, that the

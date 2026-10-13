@@ -3239,10 +3239,10 @@ struct RuleState {
   std::vector<int> reacting_local_b;
   bool seed_in_center_a = false;
   bool seed_in_center_b = false;
-  // The rule deletes a molecule without the DeleteMolecules keyword, so it
-  // may fire only if what is left forms exactly its product patterns (see
-  // RuleOp::delete_requires_product_count and product_species_after).
-  bool counts_product_species = false;
+  // The rule's products can never be what it writes (Rule::products_never_join,
+  // and Rule::products_never_split under -bscb), so BNG2 generates no
+  // reaction for it and its propensity is held at zero (issue #105).
+  bool never_fires = false;
   // The collapse a single-molecule slot's seed embeddings take: on the
   // reacting components when the seed is in the center (an empty list when
   // it is in it only as a deleted molecule), none when it is pure context.
@@ -4489,6 +4489,10 @@ struct Engine::Impl {
   int64_t events_since_propensity_rebaseline = 0;
 
   void set_rule_propensity(RuleState& rs, double new_value) {
+    // A rule whose products can never be what it writes holds zero, so it
+    // is never drawn (issue #105).  Every write comes through here.
+    if (rs.never_fires)
+      new_value = 0;
     // `!(v >= 0)` rather than `v < 0` so NaN takes the clamp too (issue #46).
     // A NaN comes from a rate law evaluated outside its domain — a negative
     // MM Km is the reachable one, since Km is a parameter and an override or
@@ -5131,6 +5135,12 @@ struct Engine::Impl {
     rule_states.resize(n_rules);
     bind_infos.resize(n_rules);
     rule_fire_counts.assign(n_rules, 0);
+    // Before any propensity is set: set_rule_propensity reads it.
+    for (int ri = 0; ri < n_rules; ++ri) {
+      auto const& rule = model.rules[ri];
+      rule_states[ri].never_fires = rule.products_never_join ||
+                                    (rule.products_never_split && model.block_same_complex_binding);
+    }
 
     // Precompute local_obs_indices: the observable slots that any local
     // function evaluates at its tag, resolved via observable_index.  MUST
@@ -5246,10 +5256,6 @@ struct Engine::Impl {
       rs.reacting_local_b = seed_reacting(rs.center_b, rs.seed_pat_b);
       rs.seed_in_center_a = rs.center_a.has_mol(rs.seed_pat_a);
       rs.seed_in_center_b = rs.seed_pat_b >= 0 && rs.center_b.has_mol(rs.seed_pat_b);
-      rs.counts_product_species =
-          std::any_of(rule.operations.begin(), rule.operations.end(), [](const RuleOp& op) {
-            return op.type == OpType::DeleteMolecule && op.delete_requires_product_count;
-          });
 
       // Pure-context reactant patterns (issue #33).  A reactant pattern that
       // NO operation in this rule touches is context: every embedding of it
@@ -10631,15 +10637,26 @@ struct Engine::Impl {
 
   // --- Graph rewriting ---
 
-  // How many species the reactant complexes of `match` fall into once the
-  // rule's operations apply, worked out without touching the pool: their
-  // molecules less the ones the rule deletes, joined by their bonds less the
-  // ones it breaks plus the ones it makes, and each molecule it adds.
-  int product_species_after(const Rule& rule, const ReactionMatch& match) const {
+  // Whether the reactant complexes of `match`, once all of the rule's
+  // operations apply, form its product patterns the way BNG2 requires
+  // (SpeciesGraph::splitConnectedComponents, then the product count and
+  // isConnected checks in RxnRule::apply_rule), worked out without touching
+  // the pool.  Their molecules less the ones the rule deletes, joined by
+  // their bonds less the ones it breaks plus the ones it makes, and each
+  // molecule it adds, fall into connected pieces, and each molecule the rule
+  // names carries the product pattern its map sends it to.  A piece holding
+  // two product patterns breaks a `+`; a product pattern in two pieces
+  // breaks a `.`; a piece holding none is a species the rule does not write,
+  // which only DeleteMolecules allows (issue #104).  The `+` is tested under
+  // -bscb, which enforces it, and always for a delete without the keyword:
+  // NFsim refuses that rule, so it has no loose reading to keep.
+  bool products_split_as_written(const Rule& rule, const ReactionMatch& match) const {
     std::unordered_set<int> deleted;
+    bool counts_extra_pieces = false;
     for (const auto& op : rule.operations) {
       if (op.type != OpType::DeleteMolecule)
         continue;
+      counts_extra_pieces = counts_extra_pieces || op.delete_requires_product_count;
       int const pi = op.delete_pattern_mol_idx;
       if (pi < 0 || pi >= static_cast<int>(match.mol_ids.size()) || match.mol_ids[pi] < 0)
         continue;
@@ -10651,6 +10668,7 @@ struct Engine::Impl {
         deleted.insert(mid);
       }
     }
+    bool const tests_plus = model.block_same_complex_binding || counts_extra_pieces;
 
     // Nodes: the surviving molecules of every complex the match touches, then
     // one per added molecule.
@@ -10722,11 +10740,41 @@ struct Engine::Impl {
         unite(node_of_comp(op.comp_flat_a, op.product_mol_a),
               node_of_comp(op.comp_flat_b, op.product_mol_b));
 
-    int pieces = 0;
-    for (int i = 0; i < n_nodes; ++i)
-      if (find(i) == i)
-        ++pieces;
-    return pieces;
+    // The product pattern of each node the rule names.
+    std::vector<int> pattern_of(n_nodes, -1);
+    int const n_named = std::min(static_cast<int>(match.mol_ids.size()),
+                                 static_cast<int>(rule.reactant_mol_to_product_mol.size()));
+    for (int mi = 0; mi < n_named; ++mi) {
+      int const p = rule.product_pattern_of_mol(rule.reactant_mol_to_product_mol[mi]);
+      auto it = node_of.find(match.mol_ids[mi]);
+      if (p >= 0 && it != node_of.end())
+        pattern_of[it->second] = p;
+    }
+    for (int pm = 0; pm < static_cast<int>(added_node.size()); ++pm)
+      if (added_node[pm] >= 0)
+        pattern_of[added_node[pm]] = rule.product_pattern_of_mol(pm);
+
+    std::vector<int> piece_pattern(n_nodes, -1); // by piece root
+    std::vector<int> pattern_piece(rule.n_product_patterns, -1);
+    for (int i = 0; i < n_nodes; ++i) {
+      int const p = pattern_of[i];
+      if (p < 0 || p >= rule.n_product_patterns)
+        continue;
+      int const root = find(i);
+      if (piece_pattern[root] < 0)
+        piece_pattern[root] = p;
+      else if (piece_pattern[root] != p && tests_plus)
+        return false; // a `+` holds together
+      if (pattern_piece[p] < 0)
+        pattern_piece[p] = root;
+      else if (pattern_piece[p] != root)
+        return false; // a `.` comes apart
+    }
+    if (counts_extra_pieces)
+      for (int i = 0; i < n_nodes; ++i)
+        if (find(i) == i && piece_pattern[i] < 0)
+          return false; // a species the rule does not write
+    return true;
   }
 
   // Whether every bond `match` would delete between molecules the rule maps
@@ -10738,8 +10786,10 @@ struct Engine::Impl {
   // molecularity (issue #102).  Under -bscb a rule's reactant patterns sit
   // in different complexes and a bond the rule makes joins molecules of one
   // product pattern, so two molecules mapped apart can only stay connected
-  // through the complex the deleted bond was in, and checking each such
-  // bond is enough.
+  // through the complex the deleted bond was in.  Checking each such bond is
+  // enough for a reactant pattern its own bonds hold together and its
+  // deleted bonds cut into two pieces; the loader sends every other shape
+  // to products_split_as_written too (Rule::checks_product_split).
   bool products_stay_apart(const Rule& rule, const ReactionMatch& match, int rule_idx) const {
     auto const n_flat = static_cast<int>(match.comp_ids.size());
     auto comp_at = [&](int flat) {
@@ -11744,18 +11794,17 @@ struct Engine::Impl {
         }
       }
 
-      // A molecule deleted without the DeleteMolecules keyword: BNG2 lets the
-      // reaction happen only if what is left forms exactly as many species as
-      // the rule has product patterns (the product count check in
-      // RxnRule::apply_rule), so `C(x!1,y!2).D(x!1) -> D(x)` does not fire on
-      // a C that also holds an E — deleting it would leave the D and the E
-      // apart.  Not gated on -bscb: NFsim refuses such a rule outright, so
-      // there is no loose reading to stay compatible with.  The propensity
-      // counts these draws, so rejecting them as null events realizes BNG2's
-      // rate exactly.
-      if (rule_states[selected].counts_product_species &&
-          product_species_after(model.rules[selected], match) !=
-              model.rules[selected].n_product_patterns) {
+      // The shapes the checks above cannot decide (Rule::checks_product_split):
+      // a molecule deleted out of a complex, with or without DeleteMolecules,
+      // and a reactant pattern its own bonds do not hold together or its
+      // deleted bonds cut into three or more pieces.  Without the keyword
+      // `C(x!1,y!2).D(x!1) -> D(x)` does not fire on a C that also holds an
+      // E, deleting it would leave the D and the E apart (#97); with it,
+      // `A(b!1).B(a!1,c!2).C(b!2) -> A(b) + C(b)` does not fire on a ring
+      // that keeps A and C together (#104).  The propensity counts these
+      // draws, so rejecting them as null events realizes BNG2's rate exactly.
+      if (model.rules[selected].checks_product_split &&
+          !products_split_as_written(model.rules[selected], match)) {
         timing_sample += std::chrono::duration<double>(t1 - t0).count();
         ++null_event_count;
         continue;
