@@ -42,6 +42,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **With `DeleteMolecules`, a rule ignored the `+` and `.` between the
+  molecules it names (issue #104), and other shapes escaped them too.**
+  BNG2 applies all of a rule's operations, then splits the result into
+  complexes. No complex may hold molecules of two product patterns, no
+  product pattern may lie in two complexes, and only `DeleteMolecules`
+  allows a complex holding none of the molecules the rule names.
+  RuleMonkey tested the two ends of each deleted bond. That decides a rule
+  only when each reactant pattern is held together by its own bonds, cut by
+  them into at most two pieces, and loses no molecule out of its complex.
+  Outside those shapes:
+
+  - Under the keyword it tested nothing. `A(b!1).B(a!1,c!2).C(b!2) ->
+    A(b) + C(b)` fired on a ring that keeps A and C together, and the same
+    rule written `-> A(b).C(b)` fired on a chain that parts them.
+  - Without the keyword it counted species. `Xk(c!1).Ck(x!1,y!2).Yk(c!2)
+    -> Xk(c) + Yk(c)`, on a Ck that also holds an Ek where Xk and Yk are
+    also bonded, leaves two species, as many as the rule has product
+    patterns, but the wrong two. It fired.
+  - `Ta(b!1,c!2).Tb(a!1).Tc(a!2) -> Ta(b,c) + Tb(a) + Tc(a)` cuts its
+    pattern into three pieces. It fired where Tb and Tc stay bonded, and
+    `-> Ta(b,c) + Tb(a).Tc(a)` fired where they come apart.
+  - A molecule joined to its pattern only by `.` was not tested.
+
+  The loader now decides per rule whether the per-bond checks are exact
+  (`Rule::checks_product_split`). For the other rules the engine splits the
+  post-reaction graph as BNG2 does (`products_split_as_written`, which
+  replaces #97's species count). The `+` part follows `-bscb`, as for a
+  deleted bond, except in a delete without the keyword, which NFsim refuses
+  and which is tested in full, as before. On
+  `tests/bng_oracle/models/product_split_full.bngl` (1000 of each,
+  t = 500, mean of 24 seeds), BNG2's network against RuleMonkey before and
+  after:
+
+  | column | BNG2 | before | after |
+  |---|---|---|---|
+  | `Plus_ring` | 1000 | 606.3 | 1000 |
+  | `Dot_chain` | 1000 | 604.3 | 1000 |
+  | `Count_ring` | 1000 | 604.4 | 1000 |
+  | `Three_ring` | 1000 | 606.7 | 1000 |
+  | `Pair_chain` | 1000 | 607.0 | 1000 |
+  | `Dotted_onP` | 1000 | 607.0 | 1000 |
+  | `Dotted_held` | 1000 | 606.6 | 1000 |
+
+  The other seven columns, each the same rule on a species it may fire on,
+  agree before and after. Every corpus rule either took this path already
+  (the no-keyword deletes in `species_delete`) or is one the per-bond
+  checks decide. A build that ran both on every event of those rules found
+  no disagreement in 15.3 million events across the 240 XMLs under
+  `tests/`, 79,306 of them rejections. The other 238 XMLs are byte-identical
+  to `main` at two seeds each. `rm_tlbr_rings` and
+  `bench_blbr_rings_posner1995` run within 2% of `main` (17.71 s against
+  17.76 s, and 3.50 s against 3.56 s, best of 3).
+
+- **A rule fired although its right-hand side could never be true (issue
+  #105).** `A(s~0) + B(a) -> A(s~1).B(a)` writes A and B in one complex,
+  but they start in two and the rule bonds nothing. A molecule the rule
+  creates and bonds to nothing is the same case. BNG2 generates no reaction
+  for such a rule; RuleMonkey fired it. It fired the mirror image too,
+  `A(s~0).B(t~0) -> A(s~1) + B(t~1)`, which writes two molecules of one
+  complex apart and deletes nothing that could part them. The loader now
+  finds both shapes from the rule's map and operations
+  (`Rule::products_never_join`, `Rule::products_never_split`), and the
+  engine holds such a rule at zero propensity. The mirror case is inert
+  under `-bscb`, the default, which enforces the `+`; with `-no-bscb` it
+  fires, as a deleted bond's would.
+
+  The load reports each such rule as a warning, not an error. BNG2 accepts
+  the model, and the rule has a definite meaning there, doing nothing, so
+  RuleMonkey runs the model as BNG2 does instead of refusing what BNG2
+  runs. The rule is almost surely a mistake, which is why it is reported.
+  NFsim's fix for the same bug warns too. On
+  `tests/bng_oracle/models/products_never_form.bngl` (1000 of each,
+  t = 500, mean of 24 seeds):
+
+  | column | BNG2 | before | after |
+  |---|---|---|---|
+  | `Join_on` | 0 | 334.3 | 0 |
+  | `Bare_on` | 0 | 396.2 | 0 |
+  | `Lone_on` | 0 | 390.7 | 0 |
+  | `Apart_on` | 0 | 392.0 | 0 |
+
+  The two controls agree before and after. `products_never_form_test`
+  pins the warnings, their severity, and the `-no-bscb` case. No corpus
+  model has either shape.
+
 - **The `+` between product patterns was tested only for rules with one
   reactant pattern, one deleted bond at a time, and on every deleted bond
   (issue #102).** BNG2 applies all of a rule's operations, then rejects the

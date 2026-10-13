@@ -99,6 +99,18 @@ struct Pattern {
       base += static_cast<int>(molecules[i].components.size());
     return base + comp_idx;
   }
+
+  // The molecule that holds flat component `flat`, or -1 if none does.
+  int mol_of_flat(int flat) const {
+    int base = 0;
+    for (int mi = 0; mi < static_cast<int>(molecules.size()); ++mi) {
+      int const nc = static_cast<int>(molecules[mi].components.size());
+      if (flat >= base && flat < base + nc)
+        return mi;
+      base += nc;
+    }
+    return -1;
+  }
 };
 
 // ---- Graph rewrite operations ----------------------------------------------
@@ -161,8 +173,10 @@ struct RuleOp {
   // A molecule delete without the keyword (BNG2 writes DeleteMolecules="0"
   // on a molecule id when the rule keeps the rest of the pattern,
   // `C(x!1).D(x!1) -> D(x)`).  Only that molecule goes, and BNG2 lets the
-  // reaction happen only if what is left forms exactly as many species as
-  // the rule has product patterns; the keyword lifts that restriction.
+  // reaction happen only if what is left forms exactly the rule's product
+  // patterns.  The keyword allows extra pieces holding none of the
+  // molecules the rule names, but the `+` and `.` between the ones it does
+  // name still hold (issue #104).
   bool delete_requires_product_count = false;
 };
 
@@ -306,6 +320,9 @@ struct Rule {
   // Reactant-to-product component map:
   // reactant flat comp index -> product flat comp index (-1 if deleted)
   std::vector<int> reactant_to_product_map;
+  // The same map for molecules: reactant-pattern molecule -> product-pattern
+  // molecule, -1 if the rule deletes it.
+  std::vector<int> reactant_mol_to_product_mol;
 
   // True if both reactant patterns bind the same molecule type on the same
   // component type (e.g., A(a) + A(a) → A(a!1).A(a!1)).
@@ -318,9 +335,47 @@ struct Rule {
   // `model.block_same_complex_binding` is set, the engine checks this at
   // fire time, whatever the rule's molecularity, and rejects an event that
   // leaves the molecules still connected (e.g., breaking one bond in a
-  // ring).
+  // ring).  Shapes that bond-by-bond check cannot decide are listed under
+  // checks_product_split below.
   int n_product_patterns = 0;
   std::vector<int> product_pattern_starts; // analogous to reactant_pattern_starts
+
+  // The product pattern that product-pattern molecule `product_mol` is in.
+  int product_pattern_of_mol(int product_mol) const {
+    int pattern = -1;
+    if (product_mol < 0)
+      return pattern;
+    for (int pi = 0; pi < static_cast<int>(product_pattern_starts.size()); ++pi)
+      if (product_pattern_starts[pi] <= product_mol)
+        pattern = pi;
+    return pattern;
+  }
+
+  // What the `+` and `.` between product patterns can do to this rule,
+  // settled at load from the map and the operations (classify_product_split
+  // in simulator.cpp, issues #104 and #105).  BNG2 applies every operation,
+  // then splits the result into connected components and rejects the
+  // reaction if one component holds molecules of two product patterns (the
+  // `+`) or one product pattern lies in two components (the `.`).
+  //
+  // A product pattern whose molecules nothing can bring into one complex:
+  // they start in different reactant patterns, or the rule creates one,
+  // and no bond the rule adds joins them (`A(s~0) + B(a) -> A(s~1).B(a)`).
+  // BNG2 generates no reaction for it, and the rule never fires.
+  bool products_never_join = false;
+  // Molecules the rule writes into different product patterns that start
+  // in one complex, where the rule deletes no bond and no molecule that
+  // could part them (`A(s~0).B(t~0) -> A(s~1) + B(t~1)`).  BNG2 generates
+  // no reaction for it; RM never fires it while block_same_complex_binding,
+  // which enforces the `+`, is on.
+  bool products_never_split = false;
+  // The checks made bond by bond (RuleOp::separates_products and
+  // ensure_connected) cannot decide this rule's `+` and `.`, so the engine
+  // splits the post-reaction graph the way BNG2 does.  Set for a molecule
+  // deleted out of a complex, for a reactant pattern its own bonds do not
+  // hold together, and for one the rule's deleted bonds cut into three or
+  // more pieces, whenever a `+` or `.` could then fail.
+  bool checks_product_split = false;
 
   // exclude_reactants / include_reactants / exclude_products / include_products
   // Each constraint applies to one reactant or product pattern (by index).
