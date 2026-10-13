@@ -12,9 +12,14 @@
 //     v1: ΔG=5  k_fwd=0.011109  k_rev=1.64872   context=[A.x=bound]
 //
 // These hardcoded values are a non-circular oracle: they come from a
-// separately-built binary, not from our own exp() calls.  A second case
-// (the cooperative-scaffold model from nfsim validate/basicModels/v40)
-// pins the multi-pattern always/conditional classification and ΔG summing.
+// separately-built binary, not from our own exp() calls.  At RT = 1 NFsim's
+// rates for a reversible binding rule are BioNetGen's, so they also check
+// arrhenius_rate, which prices each rule from the variant's ΔG (issue #107).
+// A second case (the cooperative-scaffold model from nfsim
+// validate/basicModels/v40) pins the multi-pattern always/conditional
+// classification and ΔG summing.  A third pins which rule takes phi and which
+// 1-phi, against the rates BioNetGen's network gives the rules of
+// tests/bng_oracle/models/arrhenius_formula.bngl.
 
 #include "energy_expand.hpp"
 
@@ -68,11 +73,11 @@ void test_v40_conditional_context() {
       {0, 1, 2, 0}, // A.x — X.a  (extra context)
   };
 
-  EnergyFunction efn(/*rt=*/1.0);
+  EnergyFunction efn;
   efn.add_pattern(ep);
 
   // Reaction center A.b — B.a, phi=0.5, Ea0=2.0.
-  auto variants = efn.expand_binding("A", "b", "B", "a", /*ea0=*/2.0, /*phi=*/0.5);
+  auto variants = efn.expand_binding("A", "b", "B", "a");
 
   check(variants.size() == 2, "v40: expected 2 context variants");
   if (variants.size() != 2)
@@ -99,14 +104,16 @@ void test_v40_conditional_context() {
   // v0 (A.x free): ΔG = 0, symbolic ΔG is "0".
   check_close(free_v->delta_g, 0.0, 1e-9, "v40 v0: ΔG");
   check(free_v->delta_g_expr == "0", "v40 v0: symbolic ΔG is \"0\"");
-  check_close(free_v->fwd_rate, 0.135335, 1e-5, "v40 v0: k_fwd");
-  check_close(free_v->rev_rate, 0.135335, 1e-5, "v40 v0: k_rev");
+  // The binding rule takes phi on the binding ΔG; its reverse half takes
+  // 1-phi on the unbinding ΔG.
+  check_close(arrhenius_rate(2.0, 0.5, free_v->delta_g, false), 0.135335, 1e-5, "v40 v0: k_fwd");
+  check_close(arrhenius_rate(2.0, 0.5, -free_v->delta_g, true), 0.135335, 1e-5, "v40 v0: k_rev");
 
   // v1 (A.x bound): ΔG = 5, symbolic ΔG references the source parameter.
   check_close(bound_v->delta_g, 5.0, 1e-9, "v40 v1: ΔG");
   check(bound_v->delta_g_expr == "(g_val)", "v40 v1: symbolic ΔG is \"(g_val)\"");
-  check_close(bound_v->fwd_rate, 0.011109, 1e-5, "v40 v1: k_fwd");
-  check_close(bound_v->rev_rate, 1.64872, 1e-4, "v40 v1: k_rev");
+  check_close(arrhenius_rate(2.0, 0.5, bound_v->delta_g, false), 0.011109, 1e-5, "v40 v1: k_fwd");
+  check_close(arrhenius_rate(2.0, 0.5, -bound_v->delta_g, true), 1.64872, 1e-4, "v40 v1: k_rev");
 }
 
 // ---- Case 2: cooperative scaffold — always + conditional patterns ---------
@@ -119,9 +126,6 @@ void test_cooperative_scaffold() {
   const double gf_sa = -47.5;
   const double gf_sb = -47.5;
   const double gf_sab = 1.8;
-  const double rt = 2.5774863;
-  const double phi = 0.5;
-  const double ea0 = -17.8;
 
   EnergyPatternInfo ep1;
   ep1.id = "EP1";
@@ -142,12 +146,12 @@ void test_cooperative_scaffold() {
                    EpMolecule{"A", {bound_comp("s")}}, EpMolecule{"B", {bound_comp("s")}}};
   ep3.bonds = {{0, 0, 1, 0}, {0, 1, 2, 0}}; // S.A — A.s, S.B — B.s
 
-  EnergyFunction efn(rt);
+  EnergyFunction efn;
   efn.add_pattern(ep1);
   efn.add_pattern(ep2);
   efn.add_pattern(ep3);
 
-  auto variants = efn.expand_binding("S", "A", "A", "s", ea0, phi);
+  auto variants = efn.expand_binding("S", "A", "A", "s");
 
   check(variants.size() == 2, "coop: expected 2 context variants (S.B free / bound)");
   if (variants.size() != 2)
@@ -174,14 +178,6 @@ void test_cooperative_scaffold() {
   check_close(free_v->delta_g, gf_sa, 1e-6, "coop v0: ΔG = Gf_SA");
   // S.B bound: ep1 + ep3 → ΔG = Gf_SA + Gf_SAB.
   check_close(bound_v->delta_g, gf_sa + gf_sab, 1e-6, "coop v1: ΔG = Gf_SA + Gf_SAB");
-
-  // Rates follow k_fwd = exp(-(Ea0 + phi·ΔG)/RT); recompute independently.
-  auto kf = [&](double dg) { return std::exp(-(ea0 + (phi * dg)) / rt); };
-  auto kr = [&](double dg) { return std::exp(-(ea0 + ((phi - 1.0) * dg)) / rt); };
-  check_close(free_v->fwd_rate, kf(gf_sa), 1e-6 * kf(gf_sa), "coop v0: k_fwd");
-  check_close(free_v->rev_rate, kr(gf_sa), 1e-6 * kr(gf_sa), "coop v0: k_rev");
-  check_close(bound_v->fwd_rate, kf(gf_sa + gf_sab), 1e-6 * kf(gf_sa + gf_sab), "coop v1: k_fwd");
-  check_close(bound_v->rev_rate, kr(gf_sa + gf_sab), 1e-6 * kr(gf_sa + gf_sab), "coop v1: k_rev");
 }
 
 // ---- Case 3: no overlapping energy pattern → ΔG = 0, single variant -------
@@ -192,15 +188,41 @@ void test_no_relevant_pattern() {
   ep.molecules = {EpMolecule{"C", {bound_comp("y")}}, EpMolecule{"D", {bound_comp("z")}}};
   ep.bonds = {{0, 0, 1, 0}};
 
-  EnergyFunction efn(2.0);
+  EnergyFunction efn;
   efn.add_pattern(ep);
-  auto variants = efn.expand_binding("A", "b", "B", "a", /*ea0=*/1.5, /*phi=*/0.5);
+  auto variants = efn.expand_binding("A", "b", "B", "a");
   check(variants.size() == 1, "no-overlap: single variant");
   if (variants.empty())
     return;
   check(variants[0].constraints.empty(), "no-overlap: no context constraints");
   check_close(variants[0].delta_g, 0.0, 1e-9, "no-overlap: ΔG = 0");
-  check_close(variants[0].fwd_rate, std::exp(-1.5 / 2.0), 1e-9, "no-overlap: k_fwd = exp(-Ea0/RT)");
+  check_close(arrhenius_rate(1.5, 0.5, variants[0].delta_g, false), std::exp(-1.5), 1e-12,
+              "no-overlap: k = exp(-Ea0), no RT");
+}
+
+// ---- Case 4: phi or 1-phi, and no RT --------------------------------------
+// The rates BioNetGen's network gives the rules of
+// tests/bng_oracle/models/arrhenius_formula.bngl (phi = 0.3), each with dG the
+// free-energy change of the reaction the rule writes.
+void test_bng2_phi_formula() {
+  double const phi = 0.3;
+  double const ln10 = std::log(10.0);
+  // Break: Va(b!1).Vb(a!1) -> Va(b) + Vb(a), unidirectional; the binding dG
+  // is -ln(10), so the unbinding dG is +ln(10), and the rule takes phi.
+  check_close(arrhenius_rate(6.216979751083923, phi, ln10, false), 1e-3, 1e-12,
+              "unidirectional bond-breaking rule: phi on its own dG");
+  // Revu: Qa(b!1).Qb(a!1) <-> Qa(b) + Qb(a), binding dG ln(10).  The rule as
+  // written unbinds (dG -ln(10)) and takes phi; its reverse half binds (dG
+  // ln(10)) and takes 1-phi.
+  check_close(arrhenius_rate(9.901115899874398, phi, -ln10, false), 1e-4, 1e-13,
+              "reversible rule written as unbinding: phi on the unbinding");
+  check_close(arrhenius_rate(9.901115899874398, phi, ln10, true), 1e-5, 1e-14,
+              "its reverse half: 1-phi on the binding");
+  // Rev: Ra(b) + Rb(a) <-> Ra(b!1).Rb(a!1), binding dG ln(100).
+  check_close(arrhenius_rate(10.131374409173802, phi, 2.0 * ln10, false), 1e-5, 1e-14,
+              "reversible binding rule: phi on the binding");
+  check_close(arrhenius_rate(10.131374409173802, phi, -2.0 * ln10, true), 1e-3, 1e-12,
+              "its reverse half: 1-phi on the unbinding");
 }
 
 } // namespace
@@ -209,6 +231,7 @@ int main() {
   test_v40_conditional_context();
   test_cooperative_scaffold();
   test_no_relevant_pattern();
+  test_bng2_phi_formula();
 
   if (g_failures != 0) {
     std::fprintf(stderr, "energy_expand_test: %d check(s) failed\n", g_failures);

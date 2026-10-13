@@ -43,6 +43,8 @@ MODELS = {
     "product_split": {"t_end": 500, "n_steps": 2, "seeds": 24},
     "product_split_full": {"t_end": 500, "n_steps": 2, "seeds": 24},
     "products_never_form": {"t_end": 500, "n_steps": 2, "seeds": 24},
+    "arrhenius_formula": {"t_end": 500, "n_steps": 2, "seeds": 24},
+    "arrhenius_rt": {"t_end": 500, "n_steps": 2, "seeds": 24},
 }
 
 Z_THRESHOLD = 6.0

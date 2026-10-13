@@ -591,13 +591,14 @@ void add_energy_context(const Model& model, int type_index, int reactant_idx,
   }
 }
 
-// Synthesize the forward (binding) conventional rule for one expanded
-// variant: molType1(site1) + molType2(site2) -> molType1(site1!1).molType2(site2!1)
-// with the variant's context constraints and pre-computed rate.
+// Synthesize the binding conventional rule for one expanded variant:
+// molType1(site1) + molType2(site2) -> molType1(site1!1).molType2(site2!1)
+// with the variant's context constraints and the given rate.
 Rule build_energy_binding_rule(const Model& model, const std::string& name,
                                const std::string& t1_name, const std::string& site1,
                                const std::string& t2_name, const std::string& site2,
-                               const EnergyExpandedVariant& v, const std::string& rate_expr) {
+                               const EnergyExpandedVariant& v, double rate,
+                               const std::string& rate_expr) {
   Rule r;
   r.name = name;
   r.id = name;
@@ -656,17 +657,18 @@ Rule build_energy_binding_rule(const Model& model, const std::string& name,
 
   r.same_components = (t1_name == t2_name && site1 == site2);
   r.rate_law.type = RateLawType::Ele;
-  r.rate_law.rate_value = v.fwd_rate;
+  r.rate_law.rate_value = rate;
   r.rate_law.rate_expr = rate_expr; // re-resolved on set_param of an energy param
   return r;
 }
 
-// Synthesize the reverse (unbinding) conventional rule for one expanded
-// variant: molType1(site1!1).molType2(site2!1) -> molType1(site1) + molType2(site2).
+// Synthesize the unbinding conventional rule for one expanded variant:
+// molType1(site1!1).molType2(site2!1) -> molType1(site1) + molType2(site2).
 Rule build_energy_unbinding_rule(const Model& model, const std::string& name,
                                  const std::string& t1_name, const std::string& site1,
                                  const std::string& t2_name, const std::string& site2,
-                                 const EnergyExpandedVariant& v, const std::string& rate_expr) {
+                                 const EnergyExpandedVariant& v, double rate,
+                                 const std::string& rate_expr) {
   Rule r;
   r.name = name;
   r.id = name;
@@ -724,7 +726,7 @@ Rule build_energy_unbinding_rule(const Model& model, const std::string& name,
 
   r.same_components = (t1_name == t2_name && site1 == site2);
   r.rate_law.type = RateLawType::Ele;
-  r.rate_law.rate_value = v.rev_rate;
+  r.rate_law.rate_value = rate;
   r.rate_law.rate_expr = rate_expr; // re-resolved on set_param of an energy param
   return r;
 }
@@ -733,12 +735,15 @@ Rule build_energy_unbinding_rule(const Model& model, const std::string& name,
 // Always returns true: the Arrhenius rule is consumed here so the caller
 // skips normal finalization.
 //
-// Each direction is processed independently — a forward (AddBond) rule emits
-// the binding rules with forward rates; a reverse (DeleteBond) rule emits the
-// unbinding rules with reverse rates.  For a reversible energy rule BNG2
-// emits both a forward and a reverse ReactionRule, so this reconstructs the
-// exact same rule set NFsim's "forward generates both" expansion does, while
-// also handling a standalone unbinding rule correctly.
+// Each XML rule is expanded in the direction it writes: an AddBond rule into
+// binding rules, a DeleteBond rule into unbinding rules.  BNG2 writes a
+// reversible rule as two ReactionRules, the second named `_reverse_` followed
+// by the first's name, so a reversible rule comes out as both directions and
+// a unidirectional one as one.  Each is priced as BNG2's network prices it
+// (arrhenius_rate, issue #107): phi on the dG of the reaction the XML rule
+// writes, 1-phi on it for a `_reverse_` rule, and no RT.  The name is the
+// only mark BNG2's XML puts on a reverse half: its rate law repeats the
+// forward rule's phi and Ea0.
 //
 // Shapes beyond Phase 1 (matching NFsim's binding-only coverage) are NOT
 // expanded: their id is appended to `unsupported_ids` so load_model raises a
@@ -847,27 +852,30 @@ bool try_expand_arrhenius(const Rule& base, const XmlNode& rl_node, const Energy
     }
   }
 
-  // RT is symbolic when the model declares it, so overriding RT re-resolves.
-  std::string const rt_expr =
-      (model.parameters.count("RT") != 0) ? std::string("RT") : std::to_string(efn.rt());
-
-  // fwd: exp(-(Ea0 + phi·ΔG)/RT);  rev: exp(-(Ea0 + (phi-1)·ΔG)/RT).
-  auto rate_expr = [&](bool forward, const std::string& dg) -> std::string {
-    std::string const coeff = forward ? ("(" + phi_expr + ")") : ("((" + phi_expr + ")-1)");
-    return "exp(-((" + ea0_expr + ")+(" + coeff + "*(" + dg + ")))/(" + rt_expr + "))";
+  // The rate, and the same rate as an expression of the model's parameters,
+  // so that set_param on phi, Ea0, an energy parameter or anything they are
+  // written in terms of re-resolves it.  dG is the reaction's this XML rule
+  // writes: the binding dG for an AddBond rule, its negative for a DeleteBond
+  // rule.
+  bool const reverse_half = base.name.rfind("_reverse_", 0) == 0;
+  std::string const coeff_expr = reverse_half ? ("(1-(" + phi_expr + "))") : ("(" + phi_expr + ")");
+  auto rate_expr = [&](const std::string& dg_bind) -> std::string {
+    std::string const dg = is_forward ? ("(" + dg_bind + ")") : ("(-(" + dg_bind + "))");
+    return "exp(-((" + ea0_expr + ")+(" + coeff_expr + "*" + dg + ")))";
   };
 
-  auto variants = efn.expand_binding(t1, s1, t2, s2, ea0, phi);
+  auto variants = efn.expand_binding(t1, s1, t2, s2);
   for (std::size_t i = 0; i < variants.size(); ++i) {
     std::string const nm = base.name + "_arr_v" + std::to_string(i);
+    double const dg = is_forward ? variants[i].delta_g : -variants[i].delta_g;
+    double const rate = arrhenius_rate(ea0, phi, dg, reverse_half);
+    std::string const expr = rate_expr(variants[i].delta_g_expr);
     if (is_forward)
-      model.rules.push_back(build_energy_binding_rule(model, nm + "_fwd", t1, s1, t2, s2,
-                                                      variants[i],
-                                                      rate_expr(true, variants[i].delta_g_expr)));
+      model.rules.push_back(
+          build_energy_binding_rule(model, nm + "_fwd", t1, s1, t2, s2, variants[i], rate, expr));
     else
       model.rules.push_back(
-          build_energy_unbinding_rule(model, nm + "_rev", t1, s1, t2, s2, variants[i],
-                                      rate_expr(false, variants[i].delta_g_expr)));
+          build_energy_unbinding_rule(model, nm + "_rev", t1, s1, t2, s2, variants[i], rate, expr));
   }
   return true;
 }
@@ -1686,10 +1694,7 @@ Model load_model(const std::string& xml_path,
   // Function-type rate laws (which inline the Boltzmann factors) needs no
   // expansion and is unaffected: the function is only consulted when a rule
   // declares RateLaw type="Arrhenius".
-  double energy_rt = 2.478; // NFsim default: R·T ≈ 2.478 kJ/mol at 298 K
-  if (auto rt_it = model.parameters.find("RT"); rt_it != model.parameters.end())
-    energy_rt = rt_it->second;
-  EnergyFunction energy_fn(energy_rt);
+  EnergyFunction energy_fn;
   // Arrhenius energy rules whose shape RM does not expand (see
   // try_expand_arrhenius); surfaced as Tier-0 errors below.
   std::vector<std::string> unsupported_arrhenius_ids;

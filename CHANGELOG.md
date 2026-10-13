@@ -42,6 +42,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Arrhenius rates divided by an `RT` that BioNetGen does not apply, and a
+  rule written in the unbinding direction took the wrong `phi` term (issue
+  #107).** BioNetGen's network gives a rule with `Arrhenius(phi, Ea0)` the
+  rate `exp(-(Ea0 + phi*dG))`, with `dG` the free-energy change of the
+  reaction the rule writes. It gives the reverse half of a reversible rule
+  `exp(-(Ea0 + (1-phi)*dG))`, with that half's own `dG`. There is no RT:
+  energies are in units of RT. A model that works in kJ/mol divides by its
+  own `RT` where it uses it, as BioNetGen's `Models2/energy_example1.bngl`
+  does. RuleMonkey went wrong in two ways:
+
+  - It divided every exponent by a parameter named `RT`, or by 2.478 if the
+    model had none. A model with no `RT` ran with every energy divided by
+    2.478, and a model written in BioNetGen's style was divided twice. Five
+    corpus models use a parameter named `RT` for the total receptor count;
+    none has an Arrhenius rule, but one that did would have divided its
+    energies by that count.
+  - It gave every rule that breaks a bond `(phi-1)` on the binding `dG`,
+    the term for the reverse half of a reversible binding rule. A rule
+    written in the unbinding direction, reversible or unidirectional, takes
+    `phi` on its own `dG` in BioNetGen, and its reverse half takes `1-phi`.
+    RuleMonkey swapped the two, which matters unless `phi = 0.5`.
+
+  Each rule's rate is now BioNetGen's (`arrhenius_rate`), both as the
+  number a run uses and as the expression `set_param` re-resolves, and a
+  parameter named `RT` is an ordinary parameter. **Results change for every
+  Arrhenius model that does not set `RT = 1`**, and for any rule written in
+  the unbinding direction with `phi` other than 0.5. On
+  `tests/bng_oracle/models/arrhenius_formula.bngl` (no `RT`, phi = 0.3)
+  and `arrhenius_rt.bngl` (energies in kJ/mol over the model's own
+  `RT = 2.5`), 1000 of each, mean of 24 seeds at t = 500 unless noted,
+  BNG2's network against RuleMonkey before and after:
+
+  | model | column | BNG2 | before | after |
+  |---|---|---|---|---|
+  | formula | `Rev_bound` | 715.7 | 922.2 | 716.6 |
+  | formula | `Revu_bound`, t = 250 | 975.8 | 949.4 | 976.1 |
+  | formula | `Bind_uni` | 333.3 | 999.8 | 334.0 |
+  | formula | `Break_uni` | 606.5 | 0 | 609.2 |
+  | formula | `Ctx_pair` | 368.6 | 494.6 | 368.4 |
+  | formula | `Ctx_bare` | 142.2 | 470.0 | 139.0 |
+  | rt | `Rev_bound` | 715.7 | 924.4 | 721.8 |
+  | rt | `Break_uni` | 606.5 | 0 | 606.7 |
+
+  `arrhenius_set_param_test` runs both models with a parameter overridden
+  to the value it already has, which sends every rate through its
+  expression, and scores them against the same references. The other 239
+  XMLs under `tests/` are byte-identical to `main` at two seeds each.
+  `product_split.bngl` drops the `RT = 1` it set to sidestep the old
+  division, and matches `main`'s run of the old model byte for byte. The
+  two feature-coverage Arrhenius models keep `RT = 1`, because NFsim, which
+  generates their references, still divides by it (RuleWorld/nfsim#102).
+
 - **With `DeleteMolecules`, a rule ignored the `+` and `.` between the
   molecules it names (issue #104), and other shapes escaped them too.**
   BNG2 applies all of a rule's operations, then splits the result into

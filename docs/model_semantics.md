@@ -709,19 +709,36 @@ For a binding rule `mt1(s1) + mt2(s2) <-> mt1(s1!1).mt2(s2!1)`:
 - The rule expands into `2^n` context variants (n = number of distinct
   context conditions), each a conventional binding or unbinding rule whose
   reactant templates carry the context as extra bound/free component
-  constraints, and whose rate is
-  `k_fwd = exp(-(Ea0 + phi·ΔG)/RT)` (binding) or
-  `k_rev = exp(-(Ea0 + (phi-1)·ΔG)/RT)` (unbinding). Each direction is
-  taken from its own BNG2-emitted `ReactionRule` (forward = AddBond,
-  reverse = DeleteBond), so the forward and reverse halves are expanded
-  independently.
-- `RT` is read from the `RT` parameter (default 2.478); `phi`/`Ea0` are
-  the two `Arrhenius` rate constants. Energy-pattern values come from
-  the `<EnergyPattern expression="...">` attribute.
+  constraints. BNG2 writes a reversible rule as two `ReactionRule`s, the
+  second named `_reverse_` followed by the first's name, and each is
+  expanded in the direction it writes (AddBond: binding, DeleteBond:
+  unbinding). A unidirectional rule gives one direction.
+- Each expanded rule's rate is BNG2's (`RateLaw.pm`, `evaluate_local`):
+  `exp(-(Ea0 + phi·ΔG))`, with ΔG the free-energy change of the reaction
+  the rule writes, and `exp(-(Ea0 + (1-phi)·ΔG))` for the reverse half of
+  a reversible rule. The binding ΔG of a variant is negated for a rule
+  that breaks the bond. So a reversible binding rule binds with
+  `phi·ΔG` and unbinds with `(1-phi)·(-ΔG)`, which is the same number as
+  `(phi-1)·ΔG`. A rule written in the unbinding direction, reversible or
+  unidirectional, takes `phi` on the unbinding.
+- There is no `RT`. Energies are in units of RT, as in BNG2's network. A
+  model that works in kJ/mol defines its own `RT` and divides by it where
+  it uses it, as BNG2's `Models2/energy_example1.bngl` does:
+  `Arrhenius(phi, Ea0/RT)`, and an energy pattern worth `Gf/RT`. A
+  parameter named `RT` is an ordinary parameter. Until issue #107, RM
+  divided every exponent by a parameter named `RT`, or by 2.478 if the
+  model had none, so a model without one ran with every energy divided by
+  2.478 and a model in BNG2's style was divided twice. It also gave every
+  bond-breaking rule `(phi-1)` on the binding ΔG, which is wrong for a
+  rule written in the unbinding direction unless `phi = 0.5`.
+- `phi` and `Ea0` are the two `Arrhenius` rate constants, whatever the
+  model writes there. Energy-pattern values come from the
+  `<EnergyPattern expression="...">` attribute.
 
-Each expanded rate is stored as a symbolic expression of the energy
-parameters, so `set_param` on `Ea0`, `phi`, `RT`, or an energy-pattern
-`Gf` **does** re-resolve the baked rates on the next run (same path as
+Each expanded rate is stored as a symbolic expression of the model's
+parameters, so `set_param` on `Ea0`, `phi`, an energy-pattern `Gf`, or a
+parameter they are written in terms of, such as a model's own `RT`,
+**does** re-resolve the baked rates on the next run (same path as
 ordinary `Ele` rate constants).
 
 **Deferred** (refused at Tier 0, matching NFsim's binding-only coverage):

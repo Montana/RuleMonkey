@@ -43,9 +43,7 @@
 #                  at load, so this pins that the expanded rule is marked
 #                  too.
 #   Eng_single     the same rule on a pair joined once: fires at
-#                  exp(-(Ea0 + phi*0)) = k.  RT is set to 1 so that
-#                  RuleMonkey's exp(-(Ea0 + (phi-1)*dG)/RT) reads BNG2's
-#                  units; with G0 = 0 the two agree for any phi.
+#                  exp(-(Ea0 + phi*0)) = k.
 #
 # Molecule types are separate per case, so no rule sees another case's
 # molecules.  Every count follows a closed form: N*exp(-k*t),
@@ -59,7 +57,6 @@ begin parameters
   phi   0.5
   Ea0   6.907755278982137
   G0    0
-  RT    1
 end parameters
 begin molecule types
   Sa(b,c)
