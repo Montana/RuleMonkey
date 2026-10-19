@@ -714,6 +714,26 @@ if(TARGET rm_driver)
     set_tests_properties(rm_driver_functions_print_flag PROPERTIES
         PASS_REGULAR_EXPRESSION "frac_P.*modulator.*phos_rate")
 
+    # rm_driver --reps (issue #113): the ensemble mean keeps the ordinary
+    # .gdat header, and --reps refuses the single-trajectory state flags.
+    # The numbers themselves are pinned by ensemble_test.
+    add_test(
+        NAME rm_driver_reps_mean
+        COMMAND rm_driver
+            ${_rulemonkey_test_dir}/models/feature_coverage/xml/ft_nested_functions.xml
+            10 5 7 --reps 3 --threads 2 --print-functions
+    )
+    set_tests_properties(rm_driver_reps_mean PROPERTIES
+        PASS_REGULAR_EXPRESSION "# time\tS_U\tS_P\tS_total\tfrac_P\tmodulator\tphos_rate")
+
+    add_test(
+        NAME rm_driver_reps_refuses_species
+        COMMAND rm_driver
+            ${_rulemonkey_test_dir}/models/feature_coverage/xml/ft_nested_functions.xml
+            10 5 7 --reps 3 --species unused.species
+    )
+    set_tests_properties(rm_driver_reps_refuses_species PROPERTIES WILL_FAIL TRUE)
+
     # A TotalRate rule whose reactant pattern can match one molecule more than
     # once is refused: NFsim expands it into one reaction class per symmetry
     # permutation and gives each the whole total rate (2x this rate law on
@@ -781,6 +801,22 @@ target_link_libraries(parameter_scan_test PRIVATE rulemonkey)
 add_test(
     NAME parameter_scan_test
     COMMAND parameter_scan_test
+        ${_rulemonkey_test_dir}/reference/nfsim/xml/A_plus_A.xml
+        ${_rulemonkey_test_dir}/models/feature_coverage/xml/ft_nested_functions.xml
+)
+
+# Replicate-ensemble regression (issue #113): pins down that replicate i of
+# run_ensemble is bit-identical to run(ts, base_seed + i) with overrides in
+# force, that the statistics are bit-identical for every thread count and
+# agree with a two-pass mean / sample SD, the n_reps == 1 and validation
+# edges, and that cancellation and a replicate's own exception both leave
+# the simulator usable.
+add_executable(ensemble_test cpp/ensemble_test.cpp)
+target_link_libraries(ensemble_test PRIVATE rulemonkey)
+
+add_test(
+    NAME ensemble_test
+    COMMAND ensemble_test
         ${_rulemonkey_test_dir}/reference/nfsim/xml/A_plus_A.xml
         ${_rulemonkey_test_dir}/models/feature_coverage/xml/ft_nested_functions.xml
 )
