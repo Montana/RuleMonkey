@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A table function indexed by a function crashed the process (issue
+  #111).** A `TFUN` with `ctrName` naming a global function, such as
+  `clock() = time()`, overflowed the stack on the first rate evaluation.
+  Settling the function table evaluated the TFUN's counter, and the
+  counter asked for the table to be settled first, which started another
+  settle that reached the same TFUN again. While the table is settling, the
+  counter is now evaluated against the values settled so far. The same table
+  indexed by `time` and by `clock()` now gives the same trajectory.
+
 ## [3.11.0] — 2026-10-13
 
 ### Changed

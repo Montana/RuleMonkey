@@ -4251,6 +4251,11 @@ struct Engine::Impl {
   uint64_t eval_vars_gen = 1;
   uint64_t eval_vars_seen_gen = 0;
 
+  // True while rebuild_eval_vars runs.  A TFUN whose counter is a function
+  // evaluates that function against the layout under construction instead
+  // of asking for a fresh one, which would recurse without end (issue #111).
+  bool rebuilding_eval_vars_ = false;
+
   // Eval-layout slots of the `reactant_N()` placeholders the model
   // declares, as (N, slot) pairs in declaration order (issue #59).  The
   // placeholder is an ordinary named slot — nothing else writes it, since
@@ -7087,7 +7092,13 @@ struct Engine::Impl {
     case TfunCounterSource::Function: {
       auto fit = model.function_index.find(gf.tfun_counter_name);
       if (fit != model.function_index.end() && gf_expr_id_[fit->second] >= 0) {
-        update_eval_vars();
+        // Inside rebuild_eval_vars the layout is the one being built:
+        // time, observables and every function declared before this TFUN
+        // are already written, so evaluate against it directly.  Calling
+        // update_eval_vars from there would start another rebuild, which
+        // reaches this TFUN again, without end (issue #111).
+        if (!rebuilding_eval_vars_)
+          update_eval_vars();
         return expr_eval_.evaluate(gf_expr_id_[fit->second]);
       }
       return 0.0;
@@ -7109,9 +7120,8 @@ struct Engine::Impl {
   // Function evaluation order matches the engine's internal
   // declaration order — BNG2 emits in dependency order, so earlier
   // functions are settled before later ones reference them.  The
-  // seen-gen update is deferred to AFTER the loop so a recursive
-  // call (TFUN counter source = Function) still does a full rebuild
-  // and sees later function values written, matching prior behavior.
+  // seen-gen update is deferred to AFTER the loop, so a rebuild that
+  // throws part way leaves the layout marked stale.
   void update_eval_vars() {
     if constexpr (kExprEvalProfile)
       expr_eval_profile_.update_eval_vars_calls++;
@@ -7137,6 +7147,16 @@ struct Engine::Impl {
   // miss.  Split out so the K-sampled chrono in update_eval_vars brackets
   // the real work and not the (common) short-circuit return.
   void rebuild_eval_vars() {
+    // Marks the rebuild for get_tfun_counter_value (issue #111); cleared
+    // on every exit, a throwing function evaluation included.
+    struct RebuildMark {
+      bool& flag;
+      explicit RebuildMark(bool& f) : flag(f) { flag = true; }
+      ~RebuildMark() { flag = false; }
+      RebuildMark(const RebuildMark&) = delete;
+      RebuildMark& operator=(const RebuildMark&) = delete;
+    } const mark(rebuilding_eval_vars_);
+
     eval_vars_flat[eval_time_slot] = current_time;
 
     for (int i = 0; i < static_cast<int>(model.observables.size()); ++i) {

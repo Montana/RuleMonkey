@@ -200,14 +200,16 @@ void check_late_short_call(const std::string& xml) {
 } // namespace
 
 int main(int argc, char* argv[]) {
-  if (argc < 4) {
+  if (argc < 5) {
     std::fprintf(stderr, "Usage: time_dependent_rate_test <time_dependent_rate_model.xml> "
-                         "<tfun_time_rate_model.xml> <local_time_rate_model.xml>\n");
+                         "<tfun_time_rate_model.xml> <local_time_rate_model.xml> "
+                         "<tfun_clock_rate_model.xml>\n");
     return 2;
   }
   const std::string shapes_xml = argv[1];
   const std::string tfun_xml = argv[2];
   const std::string local_xml = argv[3];
+  const std::string tfun_clock_xml = argv[4];
 
   auto ramp = [](double t) { return 50.0 * t * t; };
   std::vector<Shape> const shapes = {
@@ -234,6 +236,8 @@ int main(int argc, char* argv[]) {
        [](double t) { return 20000.0 * std::clamp(t - 1.0, 0.0, 0.01); }},
       {"tfun", tfun_xml, "Btot", {}, ramp},
       {"local", local_xml, "Ltot", {}, ramp},
+      // The same table indexed through clock() = time() (issue #111).
+      {"tfunclk", tfun_clock_xml, "Btot", {}, ramp},
   };
 
   try {
@@ -243,10 +247,11 @@ int main(int argc, char* argv[]) {
       check_mean_trajectory(s, runs.back());
     }
 
-    // ramp, dip, step, pulse and tfun: Lambda(2) = 200 and one rule drawing
-    // the same numbers, so the same B(2) in every seed.  Allow 1 for a
-    // partial sum that lands within the integration tolerance of 200.
-    for (std::size_t const si : {std::size_t{2}, std::size_t{3}, std::size_t{4}, std::size_t{5}}) {
+    // ramp, dip, step, pulse, tfun and tfunclk: Lambda(2) = 200 and one rule
+    // drawing the same numbers, so the same B(2) in every seed.  Allow 1 for
+    // a partial sum that lands within the integration tolerance of 200.
+    for (std::size_t const si :
+         {std::size_t{2}, std::size_t{3}, std::size_t{4}, std::size_t{5}, std::size_t{7}}) {
       int worst = 0;
       for (int rep = 0; rep < kReps; ++rep) {
         int const d = static_cast<int>(std::fabs(runs[si][rep].back() - runs[0][rep].back()));
