@@ -63,6 +63,7 @@ void check_mean(const std::string& name, const std::string& xml, const std::stri
       sum[k] += col[k];
     time = r.time;
   }
+  std::string const label = name + ": mean " + obs;
   for (std::size_t k = 0; k < sum.size(); ++k) {
     double const t = time[k];
     double const got = sum[k] / kReps;
@@ -70,7 +71,7 @@ void check_mean(const std::string& name, const std::string& xml, const std::stri
     double const tol = 4.0 * sd(t) / std::sqrt(static_cast<double>(kReps));
     std::fprintf(stderr, "  %-6s t=%.2f  mean=%8.3f  expected=%8.3f  tol=%.3f\n", name.c_str(), t,
                  got, expect, tol);
-    check(std::fabs(got - expect) <= tol, name + ": mean " + obs + "(" + std::to_string(t) +
+    check(std::fabs(got - expect) <= tol, label + "(" + std::to_string(t) +
                                               ") = " + std::to_string(got) + ", expected " +
                                               std::to_string(expect));
   }
