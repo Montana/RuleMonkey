@@ -732,7 +732,18 @@ if(TARGET rm_driver)
             ${_rulemonkey_test_dir}/models/feature_coverage/xml/ft_nested_functions.xml
             10 5 7 --reps 3 --species unused.species
     )
-    set_tests_properties(rm_driver_reps_refuses_species PROPERTIES WILL_FAIL TRUE)
+    set_tests_properties(rm_driver_reps_refuses_species PROPERTIES
+        PASS_REGULAR_EXPRESSION "--reps cannot be combined with")
+
+    # An unwritable --sd-out is refused before any replicate runs.
+    add_test(
+        NAME rm_driver_reps_sd_out_unwritable
+        COMMAND rm_driver
+            ${_rulemonkey_test_dir}/models/feature_coverage/xml/ft_nested_functions.xml
+            10 5 7 --reps 3 --sd-out ${CMAKE_CURRENT_BINARY_DIR}/no_such_dir/sd.tsv
+    )
+    set_tests_properties(rm_driver_reps_sd_out_unwritable PROPERTIES
+        PASS_REGULAR_EXPRESSION "cannot open --sd-out path")
 
     # A TotalRate rule whose reactant pattern can match one molecule more than
     # once is refused: NFsim expands it into one reaction class per symmetry

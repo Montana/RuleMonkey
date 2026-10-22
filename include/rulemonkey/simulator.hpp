@@ -82,13 +82,18 @@ public:
   // `should_continue`, if non-empty, is polled from the worker threads,
   // one call at a time under a lock, so it need not be thread-safe itself.
   // A `false` return stops every replicate and throws
-  // `rulemonkey::Cancelled`; no partial result is returned.
+  // `rulemonkey::Cancelled` (or a replicate's own exception, if one had
+  // already failed); no partial result is returned.
   //
-  // If replicates throw (e.g. the molecule limit is exceeded), replicates
-  // numbered above the lowest failing one are stopped, every replicate
-  // below it runs to completion, and the lowest-numbered replicate's
-  // exception is rethrown — the same error whatever the thread count or
-  // timing.  The simulator stays usable after either kind of throw.
+  // If replicates throw (an evaluation error, or an exception escaping
+  // `should_continue`, including a `Cancelled` it throws itself),
+  // replicates numbered above the lowest failing one are stopped, every
+  // replicate below it runs to completion, and the lowest-numbered
+  // replicate's exception is rethrown — the same error whatever the thread
+  // count or timing.  The simulator stays usable after either kind of
+  // throw.  The molecule limit is not an error: a replicate that exceeds
+  // it stops firing and holds that state for its remaining samples, as in
+  // run(), and is averaged in like any other.
   //
   // Throws std::runtime_error if a session is active, `spec.n_reps < 1`,
   // `spec.n_threads < 0`, or `ts.t_end` is earlier than `ts.t_start`.

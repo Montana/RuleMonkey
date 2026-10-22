@@ -12,7 +12,9 @@
 //   * a should_continue returning false throws Cancelled, the callback is
 //     never entered by two workers at once, and the simulator stays usable;
 //   * an exception escaping a replicate is rethrown as itself — not as
-//     Cancelled, not std::terminate — with one thread or several.
+//     Cancelled, not std::terminate — with one thread or several;
+//   * a Cancelled thrown by should_continue itself reaches the caller and is
+//     never dropped as if run_ensemble had stopped that replicate.
 //
 // argv[1] = A_plus_A.xml (kp; exact integer counts, so equality is exact)
 // argv[2] = ft_nested_functions.xml (three global functions)
@@ -207,6 +209,34 @@ void test_replicate_exception(const std::string& xml) {
   }
 }
 
+// A Cancelled thrown by should_continue itself (run() passes it through) is
+// that replicate's failure, not a replicate run_ensemble stopped.  Taking it
+// for one dropped the replicate and returned statistics over the rest as
+// if all n_reps had run.
+void test_callback_throws_cancelled(const std::string& xml) {
+  for (int const n_threads : {1, 4}) {
+    rulemonkey::RuleMonkeySimulator sim(xml);
+    std::atomic<int> polls{0};
+    bool threw_cancelled = false;
+    try {
+      sim.run_ensemble({0.0, 1000.0, 10}, spec(8, n_threads), 1, [&]() -> bool {
+        if (polls.fetch_add(1) == 2)
+          throw rulemonkey::Cancelled();
+        return true;
+      });
+    } catch (const rulemonkey::Cancelled&) {
+      threw_cancelled = true;
+    } catch (const std::exception& e) {
+      std::fprintf(stderr, "  unexpected exception: %s\n", e.what());
+    }
+    check(threw_cancelled,
+          "a Cancelled thrown by should_continue must reach the caller (n_threads=" +
+              std::to_string(n_threads) + ")");
+    auto e = sim.run_ensemble(kTs, spec(2, n_threads));
+    check(e.n_times() == 21, "the simulator must stay usable after a callback throws Cancelled");
+  }
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -226,6 +256,7 @@ int main(int argc, char* argv[]) {
   test_validation(aa);
   test_cancel(aa);
   test_replicate_exception(aa);
+  test_callback_throws_cancelled(aa);
 
   if (g_failures > 0) {
     std::fprintf(stderr, "ensemble_test: %d failure(s)\n", g_failures);

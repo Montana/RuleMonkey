@@ -270,6 +270,15 @@ int main(int argc, char* argv[]) {
       return 2;
     }
 
+    // Opened before the ensemble runs, so a bad path fails at once instead
+    // of after every replicate has been simulated.
+    std::ofstream sd_out;
+    if (!sd_out_path.empty()) {
+      sd_out.open(sd_out_path);
+      if (!sd_out)
+        throw std::runtime_error("cannot open --sd-out path '" + sd_out_path + "'");
+    }
+
     auto t0 = std::chrono::high_resolution_clock::now();
 
     if (reps > 0) {
@@ -286,10 +295,7 @@ int main(int argc, char* argv[]) {
 
       write_gdat(std::cout, ens.time, ens.observable_names, ens.observable_mean, ens.function_names,
                  ens.function_mean, print_functions);
-      if (!sd_out_path.empty()) {
-        std::ofstream sd_out(sd_out_path);
-        if (!sd_out)
-          throw std::runtime_error("cannot open --sd-out path '" + sd_out_path + "'");
+      if (sd_out.is_open()) {
         write_gdat(sd_out, ens.time, ens.observable_names, ens.observable_sd, ens.function_names,
                    ens.function_sd, print_functions);
         if (!sd_out.flush())

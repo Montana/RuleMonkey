@@ -177,7 +177,10 @@ struct EnsembleSpec {
   // threads than replicates are started.
   int n_threads = 0;
   // Also return every replicate's full Result in `trajectories`.  Off by
-  // default: the statistics alone need memory independent of n_reps.
+  // default, so a replicate's Result is dropped once it is folded into the
+  // statistics.  Folding is in replicate order, so a replicate that
+  // finishes ahead of a slower lower-numbered one is held until that one
+  // is folded: one slow replicate can keep up to n_reps - 1 Results alive.
   bool keep_trajectories = false;
 };
 

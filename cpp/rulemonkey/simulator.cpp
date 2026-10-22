@@ -4041,43 +4041,56 @@ EnsembleResult RuleMonkeySimulator::run_ensemble(const TimeSpec& ts, const Ensem
     }
   };
 
+  // Records replicate i's exception and stops every replicate above it.
+  auto record_failure = [&](int i, const std::exception_ptr& e) {
+    std::scoped_lock const lock(mu);
+    if (i < first_error) {
+      first_error = i;
+      first_error_ptr = e;
+    }
+    int cur = stop_from.load();
+    while (i < cur && !stop_from.compare_exchange_weak(cur, i)) {
+    }
+  };
+
   auto worker = [&]() {
     for (;;) {
       int const i = next_rep.fetch_add(1);
       if (i >= n_reps || i >= stop_from.load())
         return;
-      CancelCallback const poll = [&, i]() {
-        if (i >= stop_from.load())
-          return false;
-        if (!should_continue)
-          return true;
-        std::scoped_lock const lock(cancel_mu);
-        if (user_cancelled.load())
-          return false;
-        if (should_continue())
-          return true;
-        user_cancelled.store(true);
-        stop_from.store(0);
-        return false;
-      };
+      // Everything that can throw stays inside the try: an exception
+      // escaping a std::thread is std::terminate.
       try {
+        CancelCallback const poll = [&, i]() {
+          if (i >= stop_from.load())
+            return false;
+          if (!should_continue)
+            return true;
+          std::scoped_lock const lock(cancel_mu);
+          if (user_cancelled.load())
+            return false;
+          if (should_continue())
+            return true;
+          user_cancelled.store(true);
+          stop_from.store(0);
+          return false;
+        };
         Engine engine(model, base_seed + static_cast<std::uint64_t>(i), molecule_limit);
         auto r = std::make_unique<Result>(engine.run(ts, poll));
         std::scoped_lock const lock(mu);
         pending[i] = std::move(r);
         fold_ready();
-      } catch (const Cancelled&) { // NOLINT(bugprone-empty-catch)
-        // Stopped by a user cancel or by a lower-numbered failure; either
-        // way the outcome is decided after the join.
+      } catch (const Cancelled&) {
+        // A replicate at or above `stop_from` was stopped here, by a user
+        // cancel or a lower-numbered failure, and the ensemble is bound to
+        // throw for that reason, so it can be dropped.  Any other Cancelled
+        // (should_continue may throw one itself, as run() honors) is this
+        // replicate's own failure: dropping it would leave the replicate
+        // out of statistics that are then returned as complete.
+        if (i < stop_from.load())
+          record_failure(i, std::current_exception());
       } catch (...) {
-        std::scoped_lock const lock(mu);
-        if (i < first_error) {
-          first_error = i;
-          first_error_ptr = std::current_exception();
-        }
-        int cur = stop_from.load();
-        while (i < cur && !stop_from.compare_exchange_weak(cur, i)) {
-        }
+        record_failure(i, std::current_exception());
       }
     }
   };
@@ -4105,6 +4118,10 @@ EnsembleResult RuleMonkeySimulator::run_ensemble(const TimeSpec& ts, const Ensem
     std::rethrow_exception(first_error_ptr);
   if (user_cancelled.load())
     throw Cancelled();
+  // Statistics over fewer replicates than n_reps must never be returned.
+  if (next_fold != n_reps)
+    throw std::logic_error("run_ensemble: only " + std::to_string(next_fold) + " of " +
+                           std::to_string(n_reps) + " replicates completed");
 
   out.observable_mean = std::move(obs_stats.mean);
   out.observable_sd = obs_stats.sd(n_reps);
