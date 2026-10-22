@@ -1,0 +1,30 @@
+# Fixture for reactant_count_helper_test: a local (per-instance) rate law
+# that reaches the reactant_1() placeholder through a global helper.  RM
+# resolves reactant counts for whole-rule rate functions only, so it refuses
+# this model at load, as it does a local rate law that reads the placeholder
+# directly (reactant_count_local_fcn_model).
+begin model
+begin parameters
+  k 1e-3
+end parameters
+begin molecule types
+  A(s~0~1,m~0~1)
+end molecule types
+begin species
+  A(s~0,m~1) 100
+end species
+begin observables
+  Molecules Aon A(m~1)
+end observables
+begin functions
+  reactant_1()
+  g() = reactant_1()*k
+  lf(x) = Aon(x)*g()
+end functions
+begin reaction rules
+  A(s~0,m~1)%x -> A(s~1,m~1)  lf(x)
+end reaction rules
+end model
+begin actions
+  writeXML()
+end actions

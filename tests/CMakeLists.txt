@@ -257,6 +257,27 @@ add_test(
         ${_rulemonkey_test_dir}/cpp/reactant_count_total_rate_model.xml
 )
 
+# The same placeholder reached through a helper function (issue #59): RM
+# bound the rule's counts for the rate law's own evaluation only, so a rate
+# law reading `reactant_1()` through `g()` read g's settled slot, zero, and
+# the rule never fired.  Pins each helper shape against its closed form (a
+# chain in BNG2's order and hand-reordered, a helper two rules read, a TFUN
+# counter, and the placeholder as the whole rate law), the function values
+# each sample reports, and the load-time refusal of a local rate law that
+# reaches the placeholder through a helper.
+add_executable(reactant_count_helper_test cpp/reactant_count_helper_test.cpp)
+target_link_libraries(reactant_count_helper_test PRIVATE rulemonkey)
+
+add_test(
+    NAME reactant_count_helper_test
+    COMMAND reactant_count_helper_test
+        ${_rulemonkey_test_dir}/cpp/reactant_count_helper_model.xml
+        ${_rulemonkey_test_dir}/cpp/reactant_count_shared_helper_model.xml
+        ${_rulemonkey_test_dir}/cpp/reactant_count_bare_model.xml
+        ${_rulemonkey_test_dir}/cpp/reactant_count_tfun_counter_model.xml
+        ${_rulemonkey_test_dir}/cpp/reactant_count_local_helper_model.xml
+)
+
 # Cost of that rescan (issue #40): #38 made a local rate reading ANY global
 # rescan every instance after every event, when what gates an O(N) rescan is
 # whether the global actually moved — and a bare observable is usually a

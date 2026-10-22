@@ -1,0 +1,26 @@
+# Fixture for reactant_count_helper_test: the placeholder as the whole rate
+# law (issue #59).  BNG2 names reactant_1 itself as the rule's rate function,
+# and RM, finding no expression to evaluate, read the rule's static rate,
+# zero, so the rule never fired.
+# Under TotalRate the propensity is the count of A(s~0), so each flips at
+# rate 1 and Aoff(t) is binomial(100, exp(-t)).
+begin model
+begin molecule types
+  A(s~0~1)
+end molecule types
+begin species
+  A(s~0) 100
+end species
+begin observables
+  Molecules Aoff A(s~0)
+end observables
+begin functions
+  reactant_1()
+end functions
+begin reaction rules
+  A(s~0) -> A(s~1)  reactant_1() TotalRate
+end reaction rules
+end model
+begin actions
+  writeXML()
+end actions
