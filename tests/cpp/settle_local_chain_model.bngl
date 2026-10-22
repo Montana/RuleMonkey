@@ -1,0 +1,32 @@
+# Fixture for function_settle_order_test: the same top-down chain through
+# local functions.  BNG2 2.9.3 writes it as l2, l1, l3 -- out of dependency
+# order -- and RM re-evaluates a local chain in that order at each molecule,
+# so l2 read l3 before l3 was evaluated there and got its global value, A0 =
+# 100 rather than 1: the rule started about 50 times too fast.  Every A(s~0)
+# is a monomer, so A0(x) = 1, l2 = 2 and l1 = k*2*2 = 1: each flips at rate 1
+# and A0(t) is binomial with mean 100 exp(-t).
+begin model
+begin parameters
+  k 0.25
+end parameters
+begin molecule types
+  A(s~0~1)
+end molecule types
+begin seed species
+  A(s~0) 100
+end seed species
+begin observables
+  Molecules A0 A(s~0)
+end observables
+begin functions
+  l1(x) = k*2*l2(x)
+  l2(x) = l3(x) + 1
+  l3(x) = A0(x)
+end functions
+begin reaction rules
+  A(s~0)%z -> A(s~1)  l1(z)
+end reaction rules
+end model
+begin actions
+  writeXML()
+end actions

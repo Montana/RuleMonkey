@@ -4255,10 +4255,10 @@ struct Engine::Impl {
   // The order rebuild_eval_vars settles the function table in: each
   // function after every function it reads, and a TFUN after the function
   // that is its counter (issue #111).  Declaration order wherever that
-  // already is one, which is nearly always: BNG2 sorts functions by the
-  // references it can see.  A tfun() index is not one of them, since BNG2
-  // parses the call as a placeholder, so a TFUN can be declared ahead of
-  // its counter.
+  // already is one.  BNG2 does not promise it: 2.9.3's writeXML moves only
+  // a function's direct references ahead of it, so `a() = b()`,
+  // `b() = 2*c()`, `c() = k` comes out as b, a, c, and a tfun() index is
+  // not a reference at all, since BNG2 parses the call as a placeholder.
   std::vector<int> eval_settle_order_;
 
   // Eval-layout slots of the `reactant_N()` placeholders the model
@@ -4392,10 +4392,10 @@ struct Engine::Impl {
     }
 
     // Settle order (eval_settle_order_): a depth-first walk in declaration
-    // order, emitting each function after the functions it reads.  A cycle
-    // leaves some function reading a value not yet settled, so it is a
-    // model error rather than a silently lagged rate.  BNG2 rejects a cycle
-    // it can see; the one it cannot is through a tfun() index.
+    // order, emitting each function after the functions it reads.  A cycle,
+    // a function reading itself included, leaves some function reading a
+    // value not yet settled, so it is a model error rather than a silently
+    // lagged rate.  BNG2 writes the XML for one.
     {
       int const nf = static_cast<int>(model.functions.size());
       std::vector<std::vector<int>> reads(nf);
@@ -4403,7 +4403,7 @@ struct Engine::Impl {
         const auto& gf = model.functions[i];
         for (const auto& tok : expr::collect_variables(gf.expression_text)) {
           auto const it = model.function_index.find(tok);
-          if (it != model.function_index.end() && it->second != i)
+          if (it != model.function_index.end())
             reads[i].push_back(it->second);
         }
         if (gf.is_tfun && gf.tfun_counter_source == TfunCounterSource::Function) {

@@ -507,6 +507,22 @@ add_test(
         ${_rulemonkey_test_dir}/cpp/tfun_clock_rate_model.xml
 )
 
+# Function settle order (issue #111): RM settled its function table in
+# declaration order, and BNG2 2.9.3 writes a chain declared top down out of
+# dependency order, so a function read another's stale value -- a plain
+# chain never fired, and a local chain started about 50 times too fast.
+# Each fixture is BNG2's own XML with a closed-form trajectory; also pins
+# that a cycle, including a function reading itself, is refused.
+add_executable(function_settle_order_test cpp/function_settle_order_test.cpp)
+target_link_libraries(function_settle_order_test PRIVATE rulemonkey)
+
+add_test(
+    NAME function_settle_order_test
+    COMMAND function_settle_order_test
+        ${_rulemonkey_test_dir}/cpp/settle_chain_model.xml
+        ${_rulemonkey_test_dir}/cpp/settle_local_chain_model.xml
+)
+
 # A model symbol named `time` or `t` is that symbol, not the clock (issue
 # #87).  BNG2 accepts an observable named `time`, and RM bound the bare word
 # to the clock instead, silently; a parameter named `t` lost to RM's `t`
