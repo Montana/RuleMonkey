@@ -1,0 +1,35 @@
+# Fixture for reactant_count_helper_test: one helper read by two rules with
+# different reactant counts (issue #59).  The A rule names g() as its whole
+# rate law; the B rule reads it through _rateLaw1 = 3*g().  g() has a single
+# slot, so RM priced the B rule off the A rule's count, which is a wrong rate
+# rather than a zero one: B drained at 3*k*Aoff.
+# Under TotalRate each A(s~0) flips at rate k and each B(s~0) at rate 3k, so
+# Aoff(t) is binomial(100, exp(-k t)) and Boff(t) binomial(50, exp(-3 k t)).
+begin model
+begin parameters
+  k 1e-2
+end parameters
+begin molecule types
+  A(s~0~1)
+  B(s~0~1)
+end molecule types
+begin species
+  A(s~0) 100
+  B(s~0) 50
+end species
+begin observables
+  Molecules Aoff A(s~0)
+  Molecules Boff B(s~0)
+end observables
+begin functions
+  reactant_1()
+  g() = reactant_1()*k
+end functions
+begin reaction rules
+  A(s~0) -> A(s~1)  g() TotalRate
+  B(s~0) -> B(s~1)  3*g() TotalRate
+end reaction rules
+end model
+begin actions
+  writeXML()
+end actions

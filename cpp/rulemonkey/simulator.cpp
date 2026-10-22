@@ -2569,9 +2569,13 @@ Model load_model(const std::string& xml_path,
   // before evaluating the rate, and what the refusal below needs to check
   // that the rule actually has that many reactant patterns.
   //
-  // The walk follows function references, so a rate law that reaches the
-  // placeholder through a helper function is covered as well as the direct
-  // `reactant_1()*reactant_2()*f()` that BNG2 writes for the idiom.
+  // The walk follows function references, a TFUN's function counter among
+  // them, so a rate law that reaches the placeholder through a helper
+  // function is found as well as the direct `reactant_1()*reactant_2()*f()`
+  // that BNG2 writes for the idiom.  Finding it is half the job: the helper
+  // has a slot of its own, so the engine re-evaluates the chain of helpers
+  // against the rule's counts each time it evaluates the rate
+  // (Engine::Impl::evaluate_against_rule).
   {
     std::unordered_map<std::string, int> fn_max;
     std::unordered_set<std::string> in_progress;
@@ -2587,6 +2591,8 @@ Model load_model(const std::string& xml_path,
       int best = gf.reactant_count_index;
       for (const auto& tok : expr::collect_variables(gf.expression_text))
         best = std::max(best, self(tok, self));
+      if (gf.is_tfun && gf.tfun_counter_source == TfunCounterSource::Function)
+        best = std::max(best, self(gf.tfun_counter_name, self));
       in_progress.erase(fname);
       fn_max[fname] = best;
       return best;

@@ -1,0 +1,33 @@
+# Fixture for reactant_count_helper_test: a rate law that reaches the
+# reactant_1() placeholder through a helper function (issue #59).  BNG2 2.9.3
+# writes the functions as reactant_1, kf, g, _rateLaw1 (= 2*g()).  RM bound
+# the rule's reactant count only into the rate law's own evaluation, so g()
+# was settled with the placeholder at zero, _rateLaw1 read that zero, and the
+# rule never fired.
+# Under TotalRate the rate law is the whole propensity, 2*k*A, so each A(s~0)
+# flips at rate 2k and Aoff(t) is binomial(100, exp(-2 k t)).
+begin model
+begin parameters
+  k 1e-2
+end parameters
+begin molecule types
+  A(s~0~1)
+end molecule types
+begin species
+  A(s~0) 100
+end species
+begin observables
+  Molecules Aoff A(s~0)
+end observables
+begin functions
+  reactant_1()
+  g() = reactant_1()*kf()
+  kf() = k
+end functions
+begin reaction rules
+  A(s~0) -> A(s~1)  2*g() TotalRate
+end reaction rules
+end model
+begin actions
+  writeXML()
+end actions

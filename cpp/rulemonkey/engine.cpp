@@ -4271,15 +4271,35 @@ struct Engine::Impl {
   std::vector<std::pair<int, int>> eval_reactant_slots;
 
   // Which rule's counts a function should be evaluated against when the
-  // whole function table is settled (rebuild_eval_vars).  A rate law that
-  // reads a placeholder has no value outside the rule that owns it, so the
-  // settle pass binds that rule's counts first; -1 means the function does
-  // not read one.  Two rules sharing one rate function is not a shape BNG2
-  // writes — it names a fresh `_rateLawN` per rule — but if it happened the
-  // first owner wins and the settled value is that rule's.  Only the
-  // reported value is affected: evaluate_rate always binds the counts of
-  // the rule it was called for.
+  // whole function table is settled (rebuild_eval_vars).  A function that
+  // reads a placeholder, directly or through other functions, has no value
+  // outside a rule, so the settle pass binds a rule's counts first; -1 means
+  // no rule reads the function.  A rule's own rate law is owned by that
+  // rule, and a helper it reads on the way to a placeholder by the first
+  // rule whose rate law reads it.  Rules share a function when a helper
+  // serves two rate laws, or when two rules both name a function as their
+  // whole rate law; the first owner wins and the settled value is that
+  // rule's.  Only the reported value is affected: evaluate_rate always
+  // binds the counts of the rule it was called for.
   std::vector<int> gf_reactant_owner_rule_;
+
+  // Per function (indexed like model.functions): whether it reads a
+  // `reactant_N()` placeholder, itself or through the functions it reads,
+  // and the functions on that path — every function it reads, directly or
+  // not, that reads a placeholder in turn, in settle order, the
+  // placeholders themselves left out since nothing evaluates one.  A rate
+  // law that reaches a placeholder through a helper, `2*g()` with
+  // `g() = reactant_1()*k`, reads the helper's slot, and the slot holds
+  // whichever rule's counts it was last evaluated against, so evaluate_rate
+  // re-evaluates the chain against its own rule before the rate law
+  // (issue #59).  Empty for every function of a model that does not use
+  // the construct, and for a rate law that reads the placeholder directly.
+  std::vector<char> gf_reads_reactant_;
+  std::vector<std::vector<int>> gf_reactant_chain_;
+  // Save buffer for the chain's settled values, so evaluating one rule's
+  // rate leaves the table as the settle pass left it (see
+  // evaluate_against_rule).  Sized once to the longest chain.
+  std::vector<double> reactant_chain_save_;
 
   // Slot index for each LOCAL function, precomputed once so
   // evaluate_local_rate can save/restore its overrides without
@@ -4396,9 +4416,9 @@ struct Engine::Impl {
     // a function reading itself included, leaves some function reading a
     // value not yet settled, so it is a model error rather than a silently
     // lagged rate.  BNG2 writes the XML for one.
+    int const nf = static_cast<int>(model.functions.size());
+    std::vector<std::vector<int>> reads(nf);
     {
-      int const nf = static_cast<int>(model.functions.size());
-      std::vector<std::vector<int>> reads(nf);
       for (int i = 0; i < nf; ++i) {
         const auto& gf = model.functions[i];
         for (const auto& tok : expr::collect_variables(gf.expression_text)) {
@@ -4453,22 +4473,77 @@ struct Engine::Impl {
         eval_local_fn_slots.push_back(i);
     }
 
-    // `reactant_N()` placeholders and the rate laws that read them (#59).
+    // `reactant_N()` placeholders and the functions that read them (#59).
     eval_reactant_slots.clear();
-    gf_reactant_owner_rule_.assign(model.functions.size(), -1);
-    for (int i = 0; i < static_cast<int>(model.functions.size()); ++i) {
+    gf_reactant_owner_rule_.assign(nf, -1);
+    gf_reads_reactant_.assign(nf, 0);
+    gf_reactant_chain_.assign(nf, {});
+    reactant_chain_save_.clear();
+    for (int i = 0; i < nf; ++i) {
       int const n = model.functions[i].reactant_count_index;
       if (n > 0)
         eval_reactant_slots.emplace_back(n, eval_gf_main_slot[i]);
     }
     if (!eval_reactant_slots.empty()) {
+      // Settle order puts every function after the ones it reads, so one
+      // pass in it sees each function's reads already marked.
+      for (int const i : eval_settle_order_) {
+        bool reads_placeholder = model.functions[i].reactant_count_index > 0;
+        for (int const j : reads[i])
+          reads_placeholder = reads_placeholder || gf_reads_reactant_[j] != 0;
+        gf_reads_reactant_[i] = reads_placeholder ? 1 : 0;
+      }
+      std::vector<int> settle_rank(nf);
+      for (int p = 0; p < nf; ++p)
+        settle_rank[eval_settle_order_[p]] = p;
+      std::vector<int> seen(nf, -1);
+      std::vector<int> stack;
+      std::size_t longest = 0;
+      for (int i = 0; i < nf; ++i) {
+        if (gf_reads_reactant_[i] == 0)
+          continue;
+        auto& chain = gf_reactant_chain_[i];
+        seen[i] = i;
+        stack.assign(1, i);
+        while (!stack.empty()) {
+          int const f = stack.back();
+          stack.pop_back();
+          for (int const j : reads[f]) {
+            if (seen[j] == i || gf_reads_reactant_[j] == 0)
+              continue;
+            seen[j] = i;
+            stack.push_back(j);
+            if (model.functions[j].reactant_count_index == 0)
+              chain.push_back(j);
+          }
+        }
+        std::sort(chain.begin(), chain.end(),
+                  [&](int a, int b) { return settle_rank[a] < settle_rank[b]; });
+        longest = std::max(longest, chain.size());
+      }
+      reactant_chain_save_.resize(longest);
+
+      // Each rule owns its own rate law first, so a function that is some
+      // rule's whole rate law reports that rule's value, and only then the
+      // helpers its rate law reads.
+      std::vector<int> head(model.rules.size(), -1);
       for (int ri = 0; ri < static_cast<int>(model.rules.size()); ++ri) {
         const auto& rl = model.rules[ri].rate_law;
         if (rl.max_reactant_count_index == 0 || rl.function_name.empty())
           continue;
         auto fit = model.function_index.find(rl.function_name);
-        if (fit != model.function_index.end() && gf_reactant_owner_rule_[fit->second] < 0)
-          gf_reactant_owner_rule_[fit->second] = ri;
+        if (fit == model.function_index.end())
+          continue;
+        head[ri] = fit->second;
+        if (gf_reactant_owner_rule_[head[ri]] < 0)
+          gf_reactant_owner_rule_[head[ri]] = ri;
+      }
+      for (int ri = 0; ri < static_cast<int>(model.rules.size()); ++ri) {
+        if (head[ri] < 0)
+          continue;
+        for (int const j : gf_reactant_chain_[head[ri]])
+          if (gf_reactant_owner_rule_[j] < 0)
+            gf_reactant_owner_rule_[j] = ri;
       }
     }
   }
@@ -7089,38 +7164,85 @@ struct Engine::Impl {
 
     update_eval_vars();
 
-    // `reactant_N()` stands for this rule's own reactant counts, so bind
-    // them before the expression is evaluated (issue #59).  `rule` is always
-    // an element of model.rules — every call site indexes through it — so
-    // recovering its index by pointer arithmetic is well-defined here, the
-    // same trick set_rule_propensity uses on rule_states.
-    if (rule.rate_law.max_reactant_count_index > 0)
-      bind_reactant_counts(static_cast<int>(&rule - model.rules.data()));
-
     if (!rule.rate_law.function_name.empty()) {
       auto fit = model.function_index.find(rule.rate_law.function_name);
       if (fit != model.function_index.end()) {
         int const gi = fit->second;
-        auto& gf = model.functions[gi];
-        if (gf.is_tfun && gf.tfun) {
-          double const ctr_val = get_tfun_counter_value(gf);
-          double const tfun_val = gf.tfun->evaluate(ctr_val);
-          if (gf_expr_id_[gi] >= 0) {
-            // Patch the magic __tfun_NAME__ slot for this rule's
-            // own tfun result (update_eval_vars wrote it from the
-            // function's own counter, but BNG2 emits the rate-law
-            // wrapper expecting it pre-patched on each call).
-            eval_vars_flat[eval_gf_tfun_slot[gi]] = tfun_val;
-            return expr_eval_.evaluate(gf_expr_id_[gi]);
-          }
-          return tfun_val;
-        }
-        if (gf_expr_id_[gi] >= 0)
-          return expr_eval_.evaluate(gf_expr_id_[gi]);
+        // `reactant_N()` stands for this rule's own reactant counts, so the
+        // rate law is evaluated against them (issue #59).  `rule` is always
+        // an element of model.rules — every call site indexes through it —
+        // so recovering its index by pointer arithmetic is well-defined
+        // here, the same trick set_rule_propensity uses on rule_states.
+        if (rule.rate_law.max_reactant_count_index > 0)
+          return evaluate_against_rule(static_cast<int>(&rule - model.rules.data()), gi,
+                                       [&] { return rate_function_value(rule, gi); });
+        return rate_function_value(rule, gi);
       }
     }
 
     return rule.rate_law.rate_value;
+  }
+
+  // The value of function `gi` as `rule`'s rate law, against the layout as
+  // it stands.
+  double rate_function_value(const Rule& rule, int gi) {
+    auto& gf = model.functions[gi];
+    if (gf.is_tfun && gf.tfun) {
+      double const ctr_val = get_tfun_counter_value(gf);
+      double const tfun_val = gf.tfun->evaluate(ctr_val);
+      if (gf_expr_id_[gi] >= 0) {
+        // Patch the magic __tfun_NAME__ slot for this rule's
+        // own tfun result (update_eval_vars wrote it from the
+        // function's own counter, but BNG2 emits the rate-law
+        // wrapper expecting it pre-patched on each call).
+        eval_vars_flat[eval_gf_tfun_slot[gi]] = tfun_val;
+        return expr_eval_.evaluate(gf_expr_id_[gi]);
+      }
+      return tfun_val;
+    }
+    if (gf_expr_id_[gi] >= 0)
+      return expr_eval_.evaluate(gf_expr_id_[gi]);
+    // The placeholder itself as the whole rate law, `reactant_1() TotalRate`,
+    // which BNG2 names as the rate function directly: the count bound into
+    // its slot (issue #59).  It has no expression, so this read the rule's
+    // static rate, zero.
+    if (gf.reactant_count_index > 0)
+      return eval_vars_flat[eval_gf_main_slot[gi]];
+    return rule.rate_law.rate_value;
+  }
+
+  // Run `eval` with rule `ri`'s reactant counts bound and function `gi`'s
+  // placeholder chain (gf_reactant_chain_) re-settled against them, then put
+  // the table back as it was: the chain's functions at their settled values
+  // and the placeholders at zero.  A rate law that reads `reactant_N()` through a
+  // helper reads the helper's slot, so binding the counts alone left it
+  // reading whatever the helper was last settled against, zero outside a
+  // rule, and the rule never fired (issue #59).  The chain is re-evaluated
+  // on every call because the counts move within one generation of the
+  // cached layout: firing a rule changes match counts without moving the
+  // clock or, unless an observable counts them, the observables.  ri = -1
+  // evaluates against no rule, every placeholder zero.
+  template <typename Eval> double evaluate_against_rule(int ri, int gi, const Eval& eval) {
+    auto const& chain = gf_reactant_chain_[gi];
+    for (std::size_t k = 0; k < chain.size(); ++k)
+      reactant_chain_save_[k] = eval_vars_flat[eval_gf_main_slot[chain[k]]];
+    auto const restore = [&] {
+      for (std::size_t k = 0; k < chain.size(); ++k)
+        eval_vars_flat[eval_gf_main_slot[chain[k]]] = reactant_chain_save_[k];
+      bind_reactant_counts(-1);
+    };
+    bind_reactant_counts(ri);
+    double value = 0.0;
+    try {
+      for (int const j : chain)
+        settle_function(j);
+      value = eval();
+    } catch (...) {
+      restore();
+      throw;
+    }
+    restore();
+    return value;
   }
 
   // The value a TFUN's table is read at.  A function counter is read off the
@@ -7199,45 +7321,56 @@ struct Engine::Impl {
     }
 
     for (int const i : eval_settle_order_) {
-      auto& gf = model.functions[i];
-      if (gf.is_tfun && gf.tfun) {
-        if constexpr (kExprEvalProfile)
-          expr_eval_profile_.tfun_evals++;
-        double const val = gf.tfun->evaluate(get_tfun_counter_value(gf));
-        eval_vars_flat[eval_gf_tfun_slot[i]] = val;
-        // The function's value is its expression around the table value,
-        // `k*__TFUN_VAL__` say, as evaluate_rate computes it; only a table
-        // with no expression is the bare value.  A function reading this
-        // one reads that value.
-        if (gf_expr_id_[i] < 0) {
-          eval_vars_flat[eval_gf_main_slot[i]] = val;
-          continue;
-        }
-      } else if (gf_expr_id_[i] < 0) {
+      // A function that reads `reactant_N()`, itself or through a helper,
+      // is only meaningful against a rule, so settle it against the rule
+      // that owns it, its helpers with it, rather than against whatever
+      // was last bound (issue #59).  The placeholders themselves have no
+      // value outside a rule and are left at zero, so a settled function
+      // table reads the same however the rules happen to be ordered.
+      if (gf_reads_reactant_[i] == 0 || model.functions[i].reactant_count_index > 0) {
+        settle_function(i);
         continue;
       }
-      if constexpr (kExprEvalProfile)
-        expr_eval_profile_.global_fn_ast_evals++;
-      // A rate law that reads `reactant_N()` is only meaningful against
-      // the rule that owns it, so settle it against that rule's counts
-      // rather than against whatever was last bound (issue #59).
-      if (!eval_reactant_slots.empty() && gf_reactant_owner_rule_[i] >= 0 &&
-          gf_reactant_owner_rule_[i] < static_cast<int>(rule_states.size()))
-        bind_reactant_counts(gf_reactant_owner_rule_[i]);
-      try {
-        eval_vars_flat[eval_gf_main_slot[i]] = expr_eval_.evaluate(gf_expr_id_[i]);
-      } catch (...) {
-        eval_vars_flat[eval_gf_main_slot[i]] = 0.0;
-      }
+      int owner = gf_reactant_owner_rule_[i];
+      if (owner >= static_cast<int>(rule_states.size()))
+        owner = -1;
+      evaluate_against_rule(owner, i, [&] {
+        settle_function(i);
+        return 0.0;
+      });
     }
 
-    // The placeholders themselves have no value outside a rule; leave them
-    // at zero so a settled function table reads the same however the rules
-    // above happen to be ordered.
-    if (!eval_reactant_slots.empty())
-      bind_reactant_counts(-1);
-
     eval_vars_seen_gen = eval_vars_gen;
+  }
+
+  // Settle function `i` into its slot against the layout as it stands: the
+  // settle pass's step for one function, which evaluate_against_rule also
+  // takes for each function of a placeholder chain.
+  void settle_function(int i) {
+    auto& gf = model.functions[i];
+    if (gf.is_tfun && gf.tfun) {
+      if constexpr (kExprEvalProfile)
+        expr_eval_profile_.tfun_evals++;
+      double const val = gf.tfun->evaluate(get_tfun_counter_value(gf));
+      eval_vars_flat[eval_gf_tfun_slot[i]] = val;
+      // The function's value is its expression around the table value,
+      // `k*__TFUN_VAL__` say, as evaluate_rate computes it; only a table
+      // with no expression is the bare value.  A function reading this
+      // one reads that value.
+      if (gf_expr_id_[i] < 0) {
+        eval_vars_flat[eval_gf_main_slot[i]] = val;
+        return;
+      }
+    } else if (gf_expr_id_[i] < 0) {
+      return;
+    }
+    if constexpr (kExprEvalProfile)
+      expr_eval_profile_.global_fn_ast_evals++;
+    try {
+      eval_vars_flat[eval_gf_main_slot[i]] = expr_eval_.evaluate(gf_expr_id_[i]);
+    } catch (...) {
+      eval_vars_flat[eval_gf_main_slot[i]] = 0.0;
+    }
   }
 
   // Settle every function against the current observable values and

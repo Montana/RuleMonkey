@@ -42,6 +42,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `kf*f()`, ran at the wrong rate, and the reported `f` column was wrong.
   A rule whose rate law is `f()` itself computed it correctly. The settled
   value is now the whole expression.
+- **A rate law that read `reactant_N()` through a helper function never
+  fired (issue #59).** RM binds the asking rule's reactant counts into the
+  placeholder before it evaluates the rule's rate law, but only for that
+  one evaluation. A rate law that reads the placeholder through another
+  function, `2*g()` with `g() = reactant_1()*kf()`, read `g`'s settled
+  value, computed with the placeholder at 0. The rate was 0 and the rule
+  never fired, with no error or warning. A helper read by two rules held
+  one rule's value: with `g()` as one rule's rate law and `3*g()` as
+  another's, the second rule ran at the first rule's count. A TFUN whose
+  counter reads the placeholder was not seen to read it at all. And
+  `reactant_1() TotalRate`, which BNG2 writes with the placeholder itself
+  as the rate function, read 0. Results from 3.11.0 and earlier are wrong
+  for any model with one of these shapes. Each evaluation of such a rate
+  law now re-evaluates the functions between it and the placeholder
+  against its own rule's counts. A reported helper reads its value against
+  the rule whose whole rate law it is, or else the first rule whose rate
+  law reads it; a function no rule reads reports with the placeholder at
+  0. A local rate law that reaches the placeholder through a helper is
+  refused at load, as one that reads it directly already was.
+  `rm_driver --print-functions` output is byte-identical to before this fix
+  on all 245 XMLs under `tests/` that predate it, with and without
+  `--ignore-unsupported`.
 
 ## [3.11.0] — 2026-10-13
 
