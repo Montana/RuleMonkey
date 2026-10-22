@@ -40,6 +40,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ensemble, not once per replicate. Like `run()`, `run_ensemble()` may be
   called while a session is active.
 
+### Fixed
+
+- **A function settled ahead of a function it reads got a stale value
+  (issue #111).** RM settles the function table whenever the state it
+  reads moves, and it settled it in declaration order. BNG2 does not
+  promise that is a dependency order: 2.9.3's `writeXML` moves only a
+  function's direct references ahead of it, so a chain declared top down,
+  `a() = b()`, `b() = 2*c()`, `c() = k`, is written as `b, a, c`. `b()`
+  then read `c()` before `c()` was settled. With `0 -> B() a()` the rate
+  was 0 at the start, nothing fired to re-settle it, and `B` never
+  appeared; the reported `a` column still read 20. The same chain through
+  local functions, `l1(x) = k*2*l2(x)`, `l2(x) = l3(x) + 1`,
+  `l3(x) = A0(x)`, read `l3` at its global value instead of the
+  molecule's and started about 50 times too fast. Results from 3.11.0 and
+  earlier are wrong for any model whose XML lists a function ahead of one
+  it reads. The table is now settled in dependency order, computed once
+  per model. A cycle, a function reading itself included, has no value to
+  settle to, so such a model is now refused with an error.
+  `rm_driver --print-functions` output is byte-identical to `main` on all
+  242 XMLs under `tests/` that predate this fix.
+- **A table function indexed by a function crashed the process (issue
+  #111).** A `TFUN` with `ctrName` naming a global function, such as
+  `clock() = time()`, overflowed the stack on the first rate evaluation:
+  settling the table evaluated the TFUN's counter, and the counter asked
+  for the table to be settled first. The settle order above now puts each
+  TFUN after its counter function, and the TFUN reads the counter's settled
+  value. A `tfun()` index is not a reference BNG2 orders by at all, so a
+  TFUN can come ahead of its counter in any BNG2 version. A counter that is
+  itself a table with no expression used to read 0.
+- **A function that read a table function got the bare table value.** For
+  `f() = k*tfun(...)` the settled value of `f()` was the table value
+  without the `k`, so a function reading `f()`, such as a rate law
+  `kf*f()`, ran at the wrong rate, and the reported `f` column was wrong.
+  A rule whose rate law is `f()` itself computed it correctly. The settled
+  value is now the whole expression.
+- **A rate law that read `reactant_N()` through a helper function never
+  fired (issue #59).** RM binds the asking rule's reactant counts into the
+  placeholder before it evaluates the rule's rate law, but only for that
+  one evaluation. A rate law that reads the placeholder through another
+  function, `2*g()` with `g() = reactant_1()*kf()`, read `g`'s settled
+  value, computed with the placeholder at 0. The rate was 0 and the rule
+  never fired, with no error or warning. A helper read by two rules held
+  one rule's value: with `g()` as one rule's rate law and `3*g()` as
+  another's, the second rule ran at the first rule's count. A TFUN whose
+  counter reads the placeholder was not seen to read it at all. And
+  `reactant_1() TotalRate`, which BNG2 writes with the placeholder itself
+  as the rate function, read 0. Results from 3.11.0 and earlier are wrong
+  for any model with one of these shapes. Each evaluation of such a rate
+  law now re-evaluates the functions between it and the placeholder
+  against its own rule's counts. A reported helper reads its value against
+  the rule whose whole rate law it is, or else the first rule whose rate
+  law reads it; a function no rule reads reports with the placeholder at
+  0. A local rate law that reaches the placeholder through a helper is
+  refused at load, as one that reads it directly already was.
+  `rm_driver --print-functions` output is byte-identical to before this fix
+  on all 245 XMLs under `tests/` that predate it, with and without
+  `--ignore-unsupported`.
+
 ## [3.11.0] — 2026-10-13
 
 ### Changed

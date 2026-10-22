@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The table of tfun_time_rate_model.xml read the long way round:
+     f() = k*tfun over clock(), clock() = elapsed(), elapsed() = time(), and
+     the rule's rate law _rateLaw1() = f() reads the table through a function.
+     f() is still 100*t, so Lambda(t) = 50 t^2.  The order is one BNG2 can
+     write: it puts elapsed() ahead of clock(), which it sees read it, but
+     nothing puts clock() ahead of f(), since BNG2 parses the tfun() call as
+     a placeholder.  Pins three things (issue #111): a function counter is
+     evaluated at all (RM recursed without end), it is settled before the
+     table it indexes, and a function reading the table reads its whole
+     expression, k included. -->
+<sbml xmlns="http://www.sbml.org/sbml/level3" level="3" version="1">
+  <model id="tfun_clock_rate_model">
+    <ListOfParameters>
+      <Parameter id="k" type="Constant" value="2" expr="2"/>
+    </ListOfParameters>
+    <ListOfMoleculeTypes>
+      <MoleculeType id="B"/>
+    </ListOfMoleculeTypes>
+    <ListOfCompartments>
+    </ListOfCompartments>
+    <ListOfSpecies>
+      <Species id="S1"  concentration="0" name="B()">
+        <ListOfMolecules>
+          <Molecule id="S1_M1" name="B"/>
+        </ListOfMolecules>
+      </Species>
+    </ListOfSpecies>
+    <ListOfReactionRules>
+      <ReactionRule id="RR1" name="_R1" symmetry_factor="1">
+        <ListOfReactantPatterns>
+        </ListOfReactantPatterns>
+        <ListOfProductPatterns>
+          <ProductPattern id="RR1_PP1">
+            <ListOfMolecules>
+              <Molecule id="RR1_PP1_M1" name="B"/>
+            </ListOfMolecules>
+          </ProductPattern>
+        </ListOfProductPatterns>
+        <RateLaw id="RR1_RateLaw" type="Function" name="_rateLaw1" totalrate="0">
+          <ListOfArguments>
+          </ListOfArguments>
+        </RateLaw>
+        <Map>
+        </Map>
+        <ListOfOperations>
+          <Add id="RR1_PP1_M1"/>
+        </ListOfOperations>
+      </ReactionRule>
+    </ListOfReactionRules>
+    <ListOfObservables>
+      <Observable id="O1" name="Btot" type="Molecules">
+        <ListOfPatterns>
+          <Pattern id="O1_P1">
+            <ListOfMolecules>
+              <Molecule id="O1_P1_M1" name="B"/>
+            </ListOfMolecules>
+          </Pattern>
+        </ListOfPatterns>
+      </Observable>
+    </ListOfObservables>
+    <ListOfFunctions>
+      <Function id="f" type="TFUN" ctrName="clock" xData="0,2" yData="0,100" method="linear">
+        <ListOfReferences>
+          <Reference name="k" type="Constant"/>
+        </ListOfReferences>
+        <Expression> k*__TFUN_VAL__ </Expression>
+      </Function>
+      <Function id="_rateLaw1">
+        <ListOfReferences>
+          <Reference name="f" type="Function"/>
+        </ListOfReferences>
+        <Expression> f() </Expression>
+      </Function>
+      <Function id="elapsed">
+        <ListOfReferences>
+        </ListOfReferences>
+        <Expression> time() </Expression>
+      </Function>
+      <Function id="clock">
+        <ListOfReferences>
+          <Reference name="elapsed" type="Function"/>
+        </ListOfReferences>
+        <Expression> elapsed() </Expression>
+      </Function>
+    </ListOfFunctions>
+  </model>
+</sbml>
