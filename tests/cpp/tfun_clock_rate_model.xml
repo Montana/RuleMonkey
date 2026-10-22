@@ -1,16 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- tfun_time_rate_model.xml with the table indexed through a function:
-     ctrName="clock", and clock() = time().  The rule still runs at 100*t and
-     Lambda(t) = 50 t^2.  RM recursed without end on the first rate
-     evaluation of a TFUN whose counter is a function (issue #111). -->
+<!-- The table of tfun_time_rate_model.xml read the long way round:
+     f() = k*tfun over clock(), clock() = elapsed(), elapsed() = time(), and
+     the rule's rate law _rateLaw1() = f() reads the table through a function.
+     f() is still 100*t, so Lambda(t) = 50 t^2.  The order is one BNG2 can
+     write: it puts elapsed() ahead of clock(), which it sees read it, but
+     nothing puts clock() ahead of f(), since BNG2 parses the tfun() call as
+     a placeholder.  Pins three things (issue #111): a function counter is
+     evaluated at all (RM recursed without end), it is settled before the
+     table it indexes, and a function reading the table reads its whole
+     expression, k included. -->
 <sbml xmlns="http://www.sbml.org/sbml/level3" level="3" version="1">
   <model id="tfun_clock_rate_model">
     <ListOfParameters>
-      <Parameter id="a" type="Constant" value="100" expr="100"/>
-      <Parameter id="b" type="Constant" value="0" expr="0"/>
-      <Parameter id="c" type="Constant" value="0" expr="0"/>
-      <Parameter id="d" type="Constant" value="0" expr="0"/>
-      <Parameter id="e" type="Constant" value="0" expr="0"/>
+      <Parameter id="k" type="Constant" value="2" expr="2"/>
     </ListOfParameters>
     <ListOfMoleculeTypes>
       <MoleculeType id="B"/>
@@ -35,7 +37,7 @@
             </ListOfMolecules>
           </ProductPattern>
         </ListOfProductPatterns>
-        <RateLaw id="RR1_RateLaw" type="Function" name="f" totalrate="0">
+        <RateLaw id="RR1_RateLaw" type="Function" name="_rateLaw1" totalrate="0">
           <ListOfArguments>
           </ListOfArguments>
         </RateLaw>
@@ -58,15 +60,28 @@
       </Observable>
     </ListOfObservables>
     <ListOfFunctions>
-      <Function id="f" type="TFUN" ctrName="clock" xData="0,2" yData="0,200" method="linear">
+      <Function id="f" type="TFUN" ctrName="clock" xData="0,2" yData="0,100" method="linear">
         <ListOfReferences>
+          <Reference name="k" type="Constant"/>
         </ListOfReferences>
-        <Expression> __TFUN_VAL__ </Expression>
+        <Expression> k*__TFUN_VAL__ </Expression>
       </Function>
-      <Function id="clock">
+      <Function id="_rateLaw1">
+        <ListOfReferences>
+          <Reference name="f" type="Function"/>
+        </ListOfReferences>
+        <Expression> f() </Expression>
+      </Function>
+      <Function id="elapsed">
         <ListOfReferences>
         </ListOfReferences>
         <Expression> time() </Expression>
+      </Function>
+      <Function id="clock">
+        <ListOfReferences>
+          <Reference name="elapsed" type="Function"/>
+        </ListOfReferences>
+        <Expression> elapsed() </Expression>
       </Function>
     </ListOfFunctions>
   </model>

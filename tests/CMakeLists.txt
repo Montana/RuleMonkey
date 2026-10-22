@@ -490,9 +490,11 @@ add_test(
 # small when held.  Each fixture is one zero-order rule, so the count is
 # Poisson with a closed-form mean at every sample: a ramp from 0, a small
 # start, a mid-run zero, a step, a TFUN over time (hand-edited XML), a
-# local rate and the same TFUN indexed through a function of time (issue
-# #111).  Also pins that a function of time reads the sample's time and
-# that in-process and save/load continuations of such a model agree.
+# local rate, and the TFUN again indexed through functions declared after
+# it and read by the rate law through another function (issue #111).  Also
+# pins that a function of time, or of such a table, reads the sample's time,
+# that a table whose counter reads the table back is refused, and that
+# in-process and save/load continuations of such a model agree.
 add_executable(time_dependent_rate_test cpp/time_dependent_rate_test.cpp)
 target_link_libraries(time_dependent_rate_test PRIVATE rulemonkey)
 

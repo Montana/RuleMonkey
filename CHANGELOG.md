@@ -14,9 +14,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `clock() = time()`, overflowed the stack on the first rate evaluation.
   Settling the function table evaluated the TFUN's counter, and the
   counter asked for the table to be settled first, which started another
-  settle that reached the same TFUN again. While the table is settling, the
-  counter is now evaluated against the values settled so far. The same table
-  indexed by `time` and by `clock()` now gives the same trajectory.
+  settle that reached the same TFUN again. The table is now settled in
+  dependency order, each TFUN after the function that is its counter, and
+  the TFUN reads the counter's settled value. Declaration order is not
+  always a dependency order: BNG2 sorts functions by the references it can
+  see, and a `tfun()` index is not among them, so a TFUN can come ahead of
+  its counter, which declaration order would read a settle late. A counter
+  that is itself a table with no expression used to read 0. A counter that
+  reads its own table back has no value to settle to, so the model is now
+  refused with an error.
+- **A function that read a table function got the bare table value.** For
+  `f() = k*tfun(...)` the settled value of `f()` was the table value
+  without the `k`, so a function reading `f()`, such as a rate law
+  `kf*f()`, ran at the wrong rate, and the reported `f` column was wrong.
+  A rule whose rate law is `f()` itself computed it correctly. The settled
+  value is now the whole expression. `rm_driver --print-functions` output
+  is byte-identical to `main` on all 242 XMLs under `tests/`.
 
 ## [3.11.0] — 2026-10-13
 

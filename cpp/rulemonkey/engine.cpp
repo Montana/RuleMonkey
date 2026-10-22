@@ -2,6 +2,7 @@
 
 #include "canonical.hpp"
 #include "engine_profile.hpp"
+#include "expr_eval.hpp"
 #include "model.hpp"
 #include "table_function.hpp"
 
@@ -4251,10 +4252,14 @@ struct Engine::Impl {
   uint64_t eval_vars_gen = 1;
   uint64_t eval_vars_seen_gen = 0;
 
-  // True while rebuild_eval_vars runs.  A TFUN whose counter is a function
-  // evaluates that function against the layout under construction instead
-  // of asking for a fresh one, which would recurse without end (issue #111).
-  bool rebuilding_eval_vars_ = false;
+  // The order rebuild_eval_vars settles the function table in: each
+  // function after every function it reads, and a TFUN after the function
+  // that is its counter (issue #111).  Declaration order wherever that
+  // already is one, which is nearly always: BNG2 sorts functions by the
+  // references it can see.  A tfun() index is not one of them, since BNG2
+  // parses the call as a placeholder, so a TFUN can be declared ahead of
+  // its counter.
+  std::vector<int> eval_settle_order_;
 
   // Eval-layout slots of the `reactant_N()` placeholders the model
   // declares, as (N, slot) pairs in declaration order (issue #59).  The
@@ -4386,6 +4391,48 @@ struct Engine::Impl {
       }
     }
 
+    // Settle order (eval_settle_order_): a depth-first walk in declaration
+    // order, emitting each function after the functions it reads.  A cycle
+    // leaves some function reading a value not yet settled, so it is a
+    // model error rather than a silently lagged rate.  BNG2 rejects a cycle
+    // it can see; the one it cannot is through a tfun() index.
+    {
+      int const nf = static_cast<int>(model.functions.size());
+      std::vector<std::vector<int>> reads(nf);
+      for (int i = 0; i < nf; ++i) {
+        const auto& gf = model.functions[i];
+        for (const auto& tok : expr::collect_variables(gf.expression_text)) {
+          auto const it = model.function_index.find(tok);
+          if (it != model.function_index.end() && it->second != i)
+            reads[i].push_back(it->second);
+        }
+        if (gf.is_tfun && gf.tfun_counter_source == TfunCounterSource::Function) {
+          auto const it = model.function_index.find(gf.tfun_counter_name);
+          if (it != model.function_index.end())
+            reads[i].push_back(it->second);
+        }
+      }
+      enum class Visit { New, Open, Done };
+      std::vector<Visit> visit(nf, Visit::New);
+      eval_settle_order_.clear();
+      eval_settle_order_.reserve(nf);
+      auto settle = [&](int i, auto& self) -> void {
+        if (visit[i] == Visit::Done)
+          return;
+        if (visit[i] == Visit::Open)
+          throw std::runtime_error("function '" + model.functions[i].name +
+                                   "' depends on itself, through the functions it reads or "
+                                   "its table counter");
+        visit[i] = Visit::Open;
+        for (int const j : reads[i])
+          self(j, self);
+        visit[i] = Visit::Done;
+        eval_settle_order_.push_back(i);
+      };
+      for (int i = 0; i < nf; ++i)
+        settle(i, settle);
+    }
+
     // Cache the global-function output list once: it depends only on the
     // model (which function entries have local arguments), never on run
     // state, so embedders see a stable name vector across runs.
@@ -4398,8 +4445,10 @@ struct Engine::Impl {
       }
     }
 
+    // In settle order, since evaluate_local_factor re-evaluates the local
+    // chain sequentially from this list.
     eval_local_fn_slots.clear();
-    for (int i = 0; i < static_cast<int>(model.functions.size()); ++i) {
+    for (int const i : eval_settle_order_) {
       if (model.functions[i].is_local() && gf_expr_id_[i] >= 0)
         eval_local_fn_slots.push_back(i);
     }
@@ -7074,6 +7123,11 @@ struct Engine::Impl {
     return rule.rate_law.rate_value;
   }
 
+  // The value a TFUN's table is read at.  A function counter is read off the
+  // settled layout, not re-evaluated: evaluate_rate refreshes the layout on
+  // entry, and rebuild_eval_vars settles the counter ahead of every table
+  // that reads it (eval_settle_order_).  Refreshing the layout from here
+  // re-entered the rebuild that called it, without end (issue #111).
   double get_tfun_counter_value(const GlobalFunction& gf) {
     switch (gf.tfun_counter_source) {
     case TfunCounterSource::Time:
@@ -7091,17 +7145,8 @@ struct Engine::Impl {
     }
     case TfunCounterSource::Function: {
       auto fit = model.function_index.find(gf.tfun_counter_name);
-      if (fit != model.function_index.end() && gf_expr_id_[fit->second] >= 0) {
-        // Inside rebuild_eval_vars the layout is the one being built:
-        // time, observables and every function declared before this TFUN
-        // are already written, so evaluate against it directly.  Calling
-        // update_eval_vars from there would start another rebuild, which
-        // reaches this TFUN again, without end (issue #111).
-        if (!rebuilding_eval_vars_)
-          update_eval_vars();
-        return expr_eval_.evaluate(gf_expr_id_[fit->second]);
-      }
-      return 0.0;
+      return (fit != model.function_index.end()) ? eval_vars_flat[eval_gf_main_slot[fit->second]]
+                                                 : 0.0;
     }
     default:
       return 0.0;
@@ -7117,11 +7162,10 @@ struct Engine::Impl {
   // constant for the lifetime of the engine and were written into
   // eval_vars_flat once by init_eval_layout.
   //
-  // Function evaluation order matches the engine's internal
-  // declaration order — BNG2 emits in dependency order, so earlier
-  // functions are settled before later ones reference them.  The
-  // seen-gen update is deferred to AFTER the loop, so a rebuild that
-  // throws part way leaves the layout marked stale.
+  // Functions are settled in eval_settle_order_, so each one is settled
+  // before any function that reads it and every function counter before
+  // the tables it indexes.  The seen-gen update is deferred to AFTER the
+  // loop, so a rebuild that throws part way leaves the layout marked stale.
   void update_eval_vars() {
     if constexpr (kExprEvalProfile)
       expr_eval_profile_.update_eval_vars_calls++;
@@ -7147,16 +7191,6 @@ struct Engine::Impl {
   // miss.  Split out so the K-sampled chrono in update_eval_vars brackets
   // the real work and not the (common) short-circuit return.
   void rebuild_eval_vars() {
-    // Marks the rebuild for get_tfun_counter_value (issue #111); cleared
-    // on every exit, a throwing function evaluation included.
-    struct RebuildMark {
-      bool& flag;
-      explicit RebuildMark(bool& f) : flag(f) { flag = true; }
-      ~RebuildMark() { flag = false; }
-      RebuildMark(const RebuildMark&) = delete;
-      RebuildMark& operator=(const RebuildMark&) = delete;
-    } const mark(rebuilding_eval_vars_);
-
     eval_vars_flat[eval_time_slot] = current_time;
 
     for (int i = 0; i < static_cast<int>(model.observables.size()); ++i) {
@@ -7164,29 +7198,36 @@ struct Engine::Impl {
           (i < static_cast<int>(obs_values.size())) ? obs_values[i] : 0.0;
     }
 
-    for (int i = 0; i < static_cast<int>(model.functions.size()); ++i) {
+    for (int const i : eval_settle_order_) {
       auto& gf = model.functions[i];
       if (gf.is_tfun && gf.tfun) {
         if constexpr (kExprEvalProfile)
           expr_eval_profile_.tfun_evals++;
-        double const ctr = get_tfun_counter_value(gf);
-        double const val = gf.tfun->evaluate(ctr);
-        eval_vars_flat[eval_gf_main_slot[i]] = val;
+        double const val = gf.tfun->evaluate(get_tfun_counter_value(gf));
         eval_vars_flat[eval_gf_tfun_slot[i]] = val;
-      } else if (gf_expr_id_[i] >= 0) {
-        if constexpr (kExprEvalProfile)
-          expr_eval_profile_.global_fn_ast_evals++;
-        // A rate law that reads `reactant_N()` is only meaningful against
-        // the rule that owns it, so settle it against that rule's counts
-        // rather than against whatever was last bound (issue #59).
-        if (!eval_reactant_slots.empty() && gf_reactant_owner_rule_[i] >= 0 &&
-            gf_reactant_owner_rule_[i] < static_cast<int>(rule_states.size()))
-          bind_reactant_counts(gf_reactant_owner_rule_[i]);
-        try {
-          eval_vars_flat[eval_gf_main_slot[i]] = expr_eval_.evaluate(gf_expr_id_[i]);
-        } catch (...) {
-          eval_vars_flat[eval_gf_main_slot[i]] = 0.0;
+        // The function's value is its expression around the table value,
+        // `k*__TFUN_VAL__` say, as evaluate_rate computes it; only a table
+        // with no expression is the bare value.  A function reading this
+        // one reads that value.
+        if (gf_expr_id_[i] < 0) {
+          eval_vars_flat[eval_gf_main_slot[i]] = val;
+          continue;
         }
+      } else if (gf_expr_id_[i] < 0) {
+        continue;
+      }
+      if constexpr (kExprEvalProfile)
+        expr_eval_profile_.global_fn_ast_evals++;
+      // A rate law that reads `reactant_N()` is only meaningful against
+      // the rule that owns it, so settle it against that rule's counts
+      // rather than against whatever was last bound (issue #59).
+      if (!eval_reactant_slots.empty() && gf_reactant_owner_rule_[i] >= 0 &&
+          gf_reactant_owner_rule_[i] < static_cast<int>(rule_states.size()))
+        bind_reactant_counts(gf_reactant_owner_rule_[i]);
+      try {
+        eval_vars_flat[eval_gf_main_slot[i]] = expr_eval_.evaluate(gf_expr_id_[i]);
+      } catch (...) {
+        eval_vars_flat[eval_gf_main_slot[i]] = 0.0;
       }
     }
 
@@ -8510,8 +8551,8 @@ struct Engine::Impl {
       }
     }
 
-    // Re-evaluate local functions only.  Functions are stored in
-    // dependency order so sequential evaluation resolves the chain
+    // Re-evaluate local functions only.  eval_local_fn_slots is in
+    // settle order, so sequential evaluation resolves the chain
     // correctly.  Global functions were already settled by the
     // top-of-call update_eval_vars and DO NOT depend on local
     // observables (BNG2 emits local arg references only inside
