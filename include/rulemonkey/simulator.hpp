@@ -73,7 +73,8 @@ public:
   // workers finish in, so the result is bit-identical for every
   // `n_threads`.  Parameter overrides, initial-amount overrides, the
   // molecule limit and the bscb setting apply to every replicate, as they
-  // would to run().
+  // would to run().  Like run(), it may be called while a session is
+  // active and leaves the session untouched.
   //
   // This is the supported way to run replicates of one simulator in
   // parallel: run() itself must not be called concurrently on the same
@@ -85,18 +86,21 @@ public:
   // `rulemonkey::Cancelled` (or a replicate's own exception, if one had
   // already failed); no partial result is returned.
   //
-  // If replicates throw (an evaluation error, or an exception escaping
-  // `should_continue`, including a `Cancelled` it throws itself),
+  // If replicates throw (an unsorted `ts.sample_times`, an allocation
+  // failure, or an exception escaping `should_continue`, including a
+  // `Cancelled` it throws itself),
   // replicates numbered above the lowest failing one are stopped, every
   // replicate below it runs to completion, and the lowest-numbered
   // replicate's exception is rethrown — the same error whatever the thread
   // count or timing.  The simulator stays usable after either kind of
   // throw.  The molecule limit is not an error: a replicate that exceeds
   // it stops firing and holds that state for its remaining samples, as in
-  // run(), and is averaged in like any other.
+  // run(), and is averaged in like any other.  A rule's "propensity clamped
+  // to 0" warning prints once for the whole ensemble, from whichever
+  // replicate clamps it first.
   //
-  // Throws std::runtime_error if a session is active, `spec.n_reps < 1`,
-  // `spec.n_threads < 0`, or `ts.t_end` is earlier than `ts.t_start`.
+  // Throws std::runtime_error if `spec.n_reps < 1`, `spec.n_threads < 0`,
+  // or `ts.t_end` is earlier than `ts.t_start`.
   EnsembleResult run_ensemble(const TimeSpec& ts, const EnsembleSpec& spec,
                               std::uint64_t base_seed = 42,
                               const CancelCallback& should_continue = {});

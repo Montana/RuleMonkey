@@ -832,6 +832,16 @@ add_test(
         ${_rulemonkey_test_dir}/models/feature_coverage/xml/ft_nested_functions.xml
 )
 
+# Replicate-scheduler regression (issue #113): drives detail::run_replicates
+# with stand-in replicates to pin fold order, lowest-failure-wins under any
+# timing, and failure-vs-cancel precedence.  Needs PRIVATE access to
+# cpp/rulemonkey/ensemble.hpp (the scheduler is internal).
+add_executable(ensemble_scheduler_test cpp/ensemble_scheduler_test.cpp)
+target_link_libraries(ensemble_scheduler_test PRIVATE rulemonkey Threads::Threads)
+target_include_directories(ensemble_scheduler_test PRIVATE ${_rulemonkey_private_include_dir})
+
+add_test(NAME ensemble_scheduler_test COMMAND ensemble_scheduler_test)
+
 # Explicit output-time (sample_times) regression (issue #16): pins down
 # that TimeSpec::sample_times overrides the uniform n_points grid — an
 # explicit subset of the uniform grid is bit-identical to the full run at

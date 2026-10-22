@@ -8,7 +8,9 @@
 //   * the mean and sample SD (n - 1) agree with a two-pass computation over
 //     the kept trajectories, for observables and global functions;
 //   * n_reps == 1 gives the plain run() as the mean and an all-zero SD;
-//   * invalid specs and an active session throw;
+//   * invalid specs throw;
+//   * an active session neither blocks run_ensemble nor changes its result,
+//     and is left exactly where it was, as with run();
 //   * a should_continue returning false throws Cancelled, the callback is
 //     never entered by two workers at once, and the simulator stays usable;
 //   * an exception escaping a replicate is rethrown as itself — not as
@@ -154,10 +156,26 @@ void test_validation(const std::string& xml) {
           sim.run_ensemble({5.0, 1.0, 4}, spec(2, 1));
         }),
         "t_end < t_start must throw");
+}
+
+void test_during_session(const std::string& xml) {
+  rulemonkey::RuleMonkeySimulator fresh(xml);
+  auto const want = fresh.run_ensemble(kTs, spec(4, 2));
+
+  rulemonkey::RuleMonkeySimulator sim(xml);
   sim.initialize(1);
-  check(throws_runtime_error([&] { sim.run_ensemble(kTs, spec(2, 1)); }),
-        "an active session must throw");
-  sim.destroy_session();
+  sim.step_to(2.0);
+  double const t_session = sim.current_time();
+  auto const obs_session = sim.get_observable_values();
+  auto const got = sim.run_ensemble(kTs, spec(4, 2));
+  check(got.observable_mean == want.observable_mean && got.observable_sd == want.observable_sd &&
+            got.event_count == want.event_count,
+        "an active session must not change run_ensemble's result");
+  check(sim.has_session() && sim.current_time() == t_session &&
+            sim.get_observable_values() == obs_session,
+        "run_ensemble must leave an active session where it was");
+  sim.step_to(4.0);
+  check(sim.current_time() == 4.0, "the session must still advance after run_ensemble");
 }
 
 void test_cancel(const std::string& xml) {
@@ -254,6 +272,7 @@ int main(int argc, char* argv[]) {
   test_statistics(fn, "ft_nested_functions");
   test_single_replicate(aa);
   test_validation(aa);
+  test_during_session(aa);
   test_cancel(aa);
   test_replicate_exception(aa);
   test_callback_throws_cancelled(aa);

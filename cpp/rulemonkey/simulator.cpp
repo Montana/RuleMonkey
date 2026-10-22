@@ -2,6 +2,7 @@
 
 #include "energy_expand.hpp"
 #include "engine.hpp"
+#include "ensemble.hpp"
 #include "expr_eval.hpp"
 #include "model.hpp"
 #include "pattern_parser.hpp"
@@ -16,19 +17,16 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <map>
 #include <memory>
-#include <mutex>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -3976,8 +3974,6 @@ struct WelfordBlock {
 EnsembleResult RuleMonkeySimulator::run_ensemble(const TimeSpec& ts, const EnsembleSpec& spec,
                                                  std::uint64_t base_seed,
                                                  const CancelCallback& should_continue) {
-  if (impl_->session)
-    throw std::runtime_error("run_ensemble: cannot run during an active session");
   if (spec.n_reps < 1)
     throw std::runtime_error("run_ensemble: n_reps must be >= 1 (got " +
                              std::to_string(spec.n_reps) + ")");
@@ -3990,138 +3986,42 @@ EnsembleResult RuleMonkeySimulator::run_ensemble(const TimeSpec& ts, const Ensem
 
   // The one write to shared state, done before any worker exists.  From
   // here on the model is only read: each Engine copies it at construction.
+  // An active session is untouched, as by run(): its engine has its own copy.
   impl_->apply_overrides();
   const Model& model = impl_->model;
   int const molecule_limit = impl_->molecule_limit;
   int const n_reps = spec.n_reps;
 
-  int n_threads = spec.n_threads;
-  if (n_threads == 0)
-    n_threads = static_cast<int>(std::max(1U, std::thread::hardware_concurrency()));
-  n_threads = std::min(n_threads, n_reps);
-
   EnsembleResult out;
   out.n_reps = n_reps;
   out.base_seed = base_seed;
-
-  // Replicates are claimed in index order from `next_rep`.  A replicate that
-  // finishes ahead of its turn waits in `pending` until every lower-numbered
-  // one has been folded in.  Everything below `mu` is guarded by it.
-  std::atomic<int> next_rep{0};
-  std::mutex mu;
-  std::vector<std::unique_ptr<Result>> pending(static_cast<std::size_t>(n_reps));
-  int next_fold = 0;
   WelfordBlock obs_stats;
   WelfordBlock fn_stats;
+  int folded = 0;
 
-  // Replicates numbered at or above `stop_from` stop at their next poll.  A
-  // failure at replicate i lowers it to i, so everything below i still runs
-  // and the lowest failing replicate is found deterministically.  A user
-  // cancel lowers it to 0.
-  std::atomic<int> stop_from{n_reps};
-  std::atomic<bool> user_cancelled{false};
-  std::mutex cancel_mu;
-  int first_error = n_reps;
-  std::exception_ptr first_error_ptr;
+  // One warn-once flag per rule for the whole ensemble, so a rule whose
+  // propensity clamps to 0 warns once rather than once per replicate.
+  std::vector<std::atomic<bool>> clamp_latch(model.rules.size());
 
-  auto fold_ready = [&]() {
-    while (next_fold < n_reps && pending[next_fold]) {
-      std::unique_ptr<Result> r = std::move(pending[next_fold]);
-      ++next_fold;
-      if (next_fold == 1) {
-        out.time = r->time;
-        out.observable_names = r->observable_names;
-        out.function_names = r->function_names;
-      }
-      obs_stats.add(r->observable_data, next_fold);
-      fn_stats.add(r->function_data, next_fold);
-      out.event_count += r->event_count;
-      if (spec.keep_trajectories)
-        out.trajectories.push_back(std::move(*r));
-    }
-  };
-
-  // Records replicate i's exception and stops every replicate above it.
-  auto record_failure = [&](int i, const std::exception_ptr& e) {
-    std::scoped_lock const lock(mu);
-    if (i < first_error) {
-      first_error = i;
-      first_error_ptr = e;
-    }
-    int cur = stop_from.load();
-    while (i < cur && !stop_from.compare_exchange_weak(cur, i)) {
-    }
-  };
-
-  auto worker = [&]() {
-    for (;;) {
-      int const i = next_rep.fetch_add(1);
-      if (i >= n_reps || i >= stop_from.load())
-        return;
-      // Everything that can throw stays inside the try: an exception
-      // escaping a std::thread is std::terminate.
-      try {
-        CancelCallback const poll = [&, i]() {
-          if (i >= stop_from.load())
-            return false;
-          if (!should_continue)
-            return true;
-          std::scoped_lock const lock(cancel_mu);
-          if (user_cancelled.load())
-            return false;
-          if (should_continue())
-            return true;
-          user_cancelled.store(true);
-          stop_from.store(0);
-          return false;
-        };
+  detail::run_replicates(
+      n_reps, spec.n_threads, should_continue,
+      [&](int i, const CancelCallback& poll) {
         Engine engine(model, base_seed + static_cast<std::uint64_t>(i), molecule_limit);
-        auto r = std::make_unique<Result>(engine.run(ts, poll));
-        std::scoped_lock const lock(mu);
-        pending[i] = std::move(r);
-        fold_ready();
-      } catch (const Cancelled&) {
-        // A replicate at or above `stop_from` was stopped here, by a user
-        // cancel or a lower-numbered failure, and the ensemble is bound to
-        // throw for that reason, so it can be dropped.  Any other Cancelled
-        // (should_continue may throw one itself, as run() honors) is this
-        // replicate's own failure: dropping it would leave the replicate
-        // out of statistics that are then returned as complete.
-        if (i < stop_from.load())
-          record_failure(i, std::current_exception());
-      } catch (...) {
-        record_failure(i, std::current_exception());
-      }
-    }
-  };
-
-  if (n_threads == 1) {
-    worker();
-  } else {
-    std::vector<std::thread> threads;
-    threads.reserve(static_cast<std::size_t>(n_threads));
-    try {
-      for (int t = 0; t < n_threads; ++t)
-        threads.emplace_back(worker);
-    } catch (...) {
-      // Could not start a thread: stop the ones already running.
-      stop_from.store(0);
-      for (auto& th : threads)
-        th.join();
-      throw;
-    }
-    for (auto& th : threads)
-      th.join();
-  }
-
-  if (first_error_ptr)
-    std::rethrow_exception(first_error_ptr);
-  if (user_cancelled.load())
-    throw Cancelled();
-  // Statistics over fewer replicates than n_reps must never be returned.
-  if (next_fold != n_reps)
-    throw std::logic_error("run_ensemble: only " + std::to_string(next_fold) + " of " +
-                           std::to_string(n_reps) + " replicates completed");
+        engine.share_clamp_warnings(clamp_latch.data());
+        return engine.run(ts, poll);
+      },
+      [&](Result&& r) {
+        if (++folded == 1) {
+          out.time = r.time;
+          out.observable_names = r.observable_names;
+          out.function_names = r.function_names;
+        }
+        obs_stats.add(r.observable_data, folded);
+        fn_stats.add(r.function_data, folded);
+        out.event_count += r.event_count;
+        if (spec.keep_trajectories)
+          out.trajectories.push_back(std::move(r));
+      });
 
   out.observable_mean = std::move(obs_stats.mean);
   out.observable_sd = obs_stats.sd(n_reps);

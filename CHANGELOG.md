@@ -36,8 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A new `tsan` preset (`RULEMONKEY_ENABLE_TSAN`) and CI job run the
   threaded tests under ThreadSanitizer.
 
-  A rule's "propensity clamped to 0" warning is still issued once per rule
-  per replicate, so an ensemble can print it up to `n_reps` times.
+  A rule's "propensity clamped to 0" warning prints once for the whole
+  ensemble, not once per replicate. Like `run()`, `run_ensemble()` may be
+  called while a session is active.
 
 ## [3.11.0] — 2026-10-13
 
