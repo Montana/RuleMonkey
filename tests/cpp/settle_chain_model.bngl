@@ -1,0 +1,32 @@
+# Fixture for function_settle_order_test: a chain of functions declared top
+# down, each reading the next.  BNG2 2.9.3's writeXML moves only a function's
+# direct references ahead of it, so it writes the chain as b, a, c -- out of
+# dependency order.  Settled in declaration order, b() read c() before c()
+# had been settled, so b(), a() and the rule's rate were 0 at the start.
+# With nothing firing nothing re-settled the table, and B never appeared.
+# a() = b() = 2*c() = 2*k = 20, so B(t) is Poisson with mean 20 t.
+begin model
+begin parameters
+  k 10
+end parameters
+begin molecule types
+  B()
+end molecule types
+begin seed species
+  B() 0
+end seed species
+begin observables
+  Molecules Btot B()
+end observables
+begin functions
+  a() = b()
+  b() = 2*c()
+  c() = k
+end functions
+begin reaction rules
+  0 -> B()  a()
+end reaction rules
+end model
+begin actions
+  writeXML()
+end actions

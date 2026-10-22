@@ -36,7 +36,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <functional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -105,23 +107,60 @@ void check_mean_trajectory(const Shape& s, const std::vector<std::vector<double>
   }
 }
 
-// A function of `time` reads the sample's own time, not the time of the last
-// event before it.  Under the old recorder `clock() = time()` read the event
-// time, and 0 at every sample of a run that had not fired yet.
-void check_clock_output(const std::string& xml) {
+// A function reads the sample's own state.  `clock() = time()` reads the
+// sample's time, not the time of the last event before it: under the old
+// recorder it read the event time, and 0 at every sample of a run that had
+// not fired yet.  A table indexed through such a function reads the same
+// time, and so does a function of that table (issue #111).
+void check_function_output(const std::string& xml, const std::string& fn,
+                           const std::function<double(double)>& expect) {
   rulemonkey::RuleMonkeySimulator sim(xml);
   auto const r = sim.run({0.0, kTEnd, kPoints}, 7);
-  std::size_t ci = r.function_names.size();
+  std::size_t fi = r.function_names.size();
   for (std::size_t i = 0; i < r.function_names.size(); ++i)
-    if (r.function_names[i] == "clock")
-      ci = i;
-  check(ci < r.function_names.size(), "clock(): output function not found");
-  if (ci == r.function_names.size())
+    if (r.function_names[i] == fn)
+      fi = i;
+  check(fi < r.function_names.size(), fn + "(): output function not found");
+  if (fi == r.function_names.size())
     return;
   for (std::size_t k = 0; k < r.time.size(); ++k)
-    check(r.function_data[ci][k] == r.time[k], "clock() at sample t=" + std::to_string(r.time[k]) +
-                                                   " read " +
-                                                   std::to_string(r.function_data[ci][k]));
+    check(r.function_data[fi][k] == expect(r.time[k]),
+          fn + "() at sample t=" + std::to_string(r.time[k]) + " read " +
+              std::to_string(r.function_data[fi][k]) + ", expected " +
+              std::to_string(expect(r.time[k])));
+}
+
+// A table whose counter reads the table back has no value to settle to, so
+// the model is refused rather than run on a counter one settle stale (issue
+// #111).  Built from the clock fixture by indexing f() by itself.
+void check_counter_cycle_refused(const std::string& xml) {
+  std::ifstream const in(xml);
+  std::stringstream text;
+  text << in.rdbuf();
+  std::string body = text.str();
+  std::string const from = "ctrName=\"clock\"";
+  auto const pos = body.find(from);
+  check(pos != std::string::npos, "counter cycle: no ctrName=\"clock\" in " + xml);
+  if (pos == std::string::npos)
+    return;
+  body.replace(pos, from.size(), "ctrName=\"f\"");
+
+  // Unique per run, so two builds testing at once do not share the file.
+  auto const tmp =
+      std::filesystem::temp_directory_path() /
+      ("rm_time_dependent_rate_test." +
+       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".xml");
+  std::ofstream(tmp) << body;
+  std::string err;
+  try {
+    rulemonkey::RuleMonkeySimulator sim(tmp.string());
+    sim.run({0.0, kTEnd, kPoints}, 7);
+  } catch (const std::exception& e) {
+    err = e.what();
+  }
+  std::filesystem::remove(tmp);
+  check(err.find("depends on itself") != std::string::npos,
+        "counter cycle: f() indexed by itself was not refused (" + err + ")");
 }
 
 // Continuing a session in process and continuing it from a saved state are
@@ -200,14 +239,16 @@ void check_late_short_call(const std::string& xml) {
 } // namespace
 
 int main(int argc, char* argv[]) {
-  if (argc < 4) {
+  if (argc < 5) {
     std::fprintf(stderr, "Usage: time_dependent_rate_test <time_dependent_rate_model.xml> "
-                         "<tfun_time_rate_model.xml> <local_time_rate_model.xml>\n");
+                         "<tfun_time_rate_model.xml> <local_time_rate_model.xml> "
+                         "<tfun_clock_rate_model.xml>\n");
     return 2;
   }
   const std::string shapes_xml = argv[1];
   const std::string tfun_xml = argv[2];
   const std::string local_xml = argv[3];
+  const std::string tfun_clock_xml = argv[4];
 
   auto ramp = [](double t) { return 50.0 * t * t; };
   std::vector<Shape> const shapes = {
@@ -234,6 +275,9 @@ int main(int argc, char* argv[]) {
        [](double t) { return 20000.0 * std::clamp(t - 1.0, 0.0, 0.01); }},
       {"tfun", tfun_xml, "Btot", {}, ramp},
       {"local", local_xml, "Ltot", {}, ramp},
+      // The table of `tfun` again, indexed through clock() and read through
+      // _rateLaw1() (issue #111).
+      {"tfunclk", tfun_clock_xml, "Btot", {}, ramp},
   };
 
   try {
@@ -243,10 +287,11 @@ int main(int argc, char* argv[]) {
       check_mean_trajectory(s, runs.back());
     }
 
-    // ramp, dip, step, pulse and tfun: Lambda(2) = 200 and one rule drawing
-    // the same numbers, so the same B(2) in every seed.  Allow 1 for a
-    // partial sum that lands within the integration tolerance of 200.
-    for (std::size_t const si : {std::size_t{2}, std::size_t{3}, std::size_t{4}, std::size_t{5}}) {
+    // ramp, dip, step, pulse, tfun and tfunclk: Lambda(2) = 200 and one rule
+    // drawing the same numbers, so the same B(2) in every seed.  Allow 1 for
+    // a partial sum that lands within the integration tolerance of 200.
+    for (std::size_t const si :
+         {std::size_t{2}, std::size_t{3}, std::size_t{4}, std::size_t{5}, std::size_t{7}}) {
       int worst = 0;
       for (int rep = 0; rep < kReps; ++rep) {
         int const d = static_cast<int>(std::fabs(runs[si][rep].back() - runs[0][rep].back()));
@@ -256,7 +301,13 @@ int main(int argc, char* argv[]) {
                             std::to_string(worst) + " in one seed");
     }
 
-    check_clock_output(shapes_xml);
+    auto identity = [](double t) { return t; };
+    auto table = [](double t) { return 100.0 * t; };
+    check_function_output(shapes_xml, "clock", identity);
+    check_function_output(tfun_clock_xml, "clock", identity);
+    check_function_output(tfun_clock_xml, "f", table);
+    check_function_output(tfun_clock_xml, "_rateLaw1", table);
+    check_counter_cycle_refused(tfun_clock_xml);
     check_continuation(shapes_xml);
     check_late_short_call(shapes_xml);
   } catch (const std::exception& e) {

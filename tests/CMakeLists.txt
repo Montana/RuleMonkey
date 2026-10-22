@@ -489,9 +489,12 @@ add_test(
 # lost a rate that starts at 0 (`k*time()` never fired) and any rate that is
 # small when held.  Each fixture is one zero-order rule, so the count is
 # Poisson with a closed-form mean at every sample: a ramp from 0, a small
-# start, a mid-run zero, a step, a TFUN over time (hand-edited XML) and a
-# local rate.  Also pins that a function of time reads the sample's time and
-# that in-process and save/load continuations of such a model agree.
+# start, a mid-run zero, a step, a TFUN over time (hand-edited XML), a
+# local rate, and the TFUN again indexed through functions declared after
+# it and read by the rate law through another function (issue #111).  Also
+# pins that a function of time, or of such a table, reads the sample's time,
+# that a table whose counter reads the table back is refused, and that
+# in-process and save/load continuations of such a model agree.
 add_executable(time_dependent_rate_test cpp/time_dependent_rate_test.cpp)
 target_link_libraries(time_dependent_rate_test PRIVATE rulemonkey)
 
@@ -501,6 +504,23 @@ add_test(
         ${_rulemonkey_test_dir}/cpp/time_dependent_rate_model.xml
         ${_rulemonkey_test_dir}/cpp/tfun_time_rate_model.xml
         ${_rulemonkey_test_dir}/cpp/local_time_rate_model.xml
+        ${_rulemonkey_test_dir}/cpp/tfun_clock_rate_model.xml
+)
+
+# Function settle order (issue #111): RM settled its function table in
+# declaration order, and BNG2 2.9.3 writes a chain declared top down out of
+# dependency order, so a function read another's stale value -- a plain
+# chain never fired, and a local chain started about 50 times too fast.
+# Each fixture is BNG2's own XML with a closed-form trajectory; also pins
+# that a cycle, including a function reading itself, is refused.
+add_executable(function_settle_order_test cpp/function_settle_order_test.cpp)
+target_link_libraries(function_settle_order_test PRIVATE rulemonkey)
+
+add_test(
+    NAME function_settle_order_test
+    COMMAND function_settle_order_test
+        ${_rulemonkey_test_dir}/cpp/settle_chain_model.xml
+        ${_rulemonkey_test_dir}/cpp/settle_local_chain_model.xml
 )
 
 # A model symbol named `time` or `t` is that symbol, not the clock (issue

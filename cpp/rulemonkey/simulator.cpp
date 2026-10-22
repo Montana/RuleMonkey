@@ -2494,8 +2494,8 @@ Model load_model(const std::string& xml_path,
           break;
         }
         case TfunCounterSource::Function: {
-          // Engine::get_tfun_counter_value evaluates this one at global
-          // scope; a local callee has no tag there, so don't pretend to
+          // Engine::get_tfun_counter_value reads this one's settled global
+          // value; a local callee has no tag there, so don't pretend to
           // know what it reads.
           auto ci = model.function_index.find(gf.tfun_counter_name);
           if (ci == model.function_index.end() || model.functions[ci->second].is_local())

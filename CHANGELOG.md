@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A function settled ahead of a function it reads got a stale value
+  (issue #111).** RM settles the function table whenever the state it
+  reads moves, and it settled it in declaration order. BNG2 does not
+  promise that is a dependency order: 2.9.3's `writeXML` moves only a
+  function's direct references ahead of it, so a chain declared top down,
+  `a() = b()`, `b() = 2*c()`, `c() = k`, is written as `b, a, c`. `b()`
+  then read `c()` before `c()` was settled. With `0 -> B() a()` the rate
+  was 0 at the start, nothing fired to re-settle it, and `B` never
+  appeared; the reported `a` column still read 20. The same chain through
+  local functions, `l1(x) = k*2*l2(x)`, `l2(x) = l3(x) + 1`,
+  `l3(x) = A0(x)`, read `l3` at its global value instead of the
+  molecule's and started about 50 times too fast. Results from 3.11.0 and
+  earlier are wrong for any model whose XML lists a function ahead of one
+  it reads. The table is now settled in dependency order, computed once
+  per model. A cycle, a function reading itself included, has no value to
+  settle to, so such a model is now refused with an error.
+  `rm_driver --print-functions` output is byte-identical to `main` on all
+  242 XMLs under `tests/` that predate this fix.
+- **A table function indexed by a function crashed the process (issue
+  #111).** A `TFUN` with `ctrName` naming a global function, such as
+  `clock() = time()`, overflowed the stack on the first rate evaluation:
+  settling the table evaluated the TFUN's counter, and the counter asked
+  for the table to be settled first. The settle order above now puts each
+  TFUN after its counter function, and the TFUN reads the counter's settled
+  value. A `tfun()` index is not a reference BNG2 orders by at all, so a
+  TFUN can come ahead of its counter in any BNG2 version. A counter that is
+  itself a table with no expression used to read 0.
+- **A function that read a table function got the bare table value.** For
+  `f() = k*tfun(...)` the settled value of `f()` was the table value
+  without the `k`, so a function reading `f()`, such as a rate law
+  `kf*f()`, ran at the wrong rate, and the reported `f` column was wrong.
+  A rule whose rate law is `f()` itself computed it correctly. The settled
+  value is now the whole expression.
+
 ## [3.11.0] — 2026-10-13
 
 ### Changed
